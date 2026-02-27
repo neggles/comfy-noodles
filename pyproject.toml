@@ -1,0 +1,87 @@
+[project]
+name = "noodles"
+version = "0.1.0"
+description = "neggles custom comfy nodes."
+readme = "README.md"
+authors = [
+    { name = "Andi Powers-Holmes", email = "aholmes@omnom.net" },
+]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Environment :: GPU :: AMD ROCm",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.2.6",
+    "pydantic-extra-types[python-ulid]>=2.11.0",
+    "python-ulid>=3.1.0",
+]
+
+[project.urls]
+Repository = "https://github.com/neggles/noodles"
+BugTracker = "https://github.com/neggles/noodles/issues"
+Documentation = "https://github.com/neggles/noodles/wiki"
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "bump-my-version>=1.2.7",
+    "coverage>=7.13.4",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "ruff>=0.15.2",
+]
+
+
+[tool.ruff]
+line-length = 140
+src = ["src", "tests"]
+target-version = "py312"
+
+# Add rules to ban exec/eval
+[tool.ruff.lint]
+select = [
+    "E4",  # ruff defaults, pycodestyle errors
+    "E7",  # ^^
+    "E9",  # ^^
+    "F",   # ruff defaults, pyflakes rules
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade rules
+    "PTH", # flake8-use-pathlib
+]
+ignore = [
+    "E501", # line too long (handled by line-length)
+    "B905", # zip without explicit strict=
+]
+unfixable = [
+    "B", # flake8-bugbear autofixes can be unsafe, so disable those autofixes
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "double"
+
+[tool.ruff.lint.isort]
+force-wrap-aliases = true
+combine-as-imports = true
+
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = [
+    "tests",
+]
+
+
+[tool.comfy]
+PublisherId = "neggles"
+DisplayName = "noodles"
+Icon = "🍜"
+Tags = []
+Repository = "https://github.com/neggles/noodles"

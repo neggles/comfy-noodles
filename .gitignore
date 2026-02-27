@@ -273,6 +273,16 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 
+# local work dirs
+/misc/
+/temp/
+
 # direnv/dotenv
 .env*
 !.env*.example
+
+# for overriding settings from pyproject.toml locally
+ty.toml
+
+# ignore codex dir
+.codex/
