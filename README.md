@@ -1,12 +1,12 @@
 # noodles
 
-A collection of custom nodes for ComfyUI
+some comfyui nodes for the purposes of committing war crimes with video models
 
-> [!NOTE]
-> This projected was created with a [cookiecutter](https://github.com/Comfy-Org/cookiecutter-comfy-extension) template. It helps you start writing custom nodes without worrying about the Python setup.
+also just some misc utility nodes
 
 ## Quickstart
 
+1. Probably don't use this. It doesn't even qualify as a "WIP".
 1. Install [ComfyUI](https://docs.comfy.org/get_started).
 1. Install [ComfyUI-Manager](https://github.com/ltdrdata/ComfyUI-Manager)
 1. Look up this extension in ComfyUI-Manager. If you are installing manually, clone this repository under `ComfyUI/custom_nodes`.
@@ -22,29 +22,17 @@ To install the dev dependencies and pre-commit (will run the ruff hook), do:
 
 ```bash
 cd noodles
-pip install -e .[dev]
+uv pip install -e '.[dev]'
 pre-commit install
 ```
 
-The `-e` flag above will result in a "live" install, in the sense that any changes you make to your node extension will automatically be picked up the next time you run ComfyUI.
+This assumes you have `uv`. If you do not have `uv`, you should get `uv`. You can also try just
+`pip install -e '.[dev]'` and that should work probably.
 
 ## Tests
 
-This repo contains unit tests written in Pytest in the `tests/` directory. It is recommended to unit test your custom node.
+This repo contains unit tests written in Pytest in the `tests/` directory. They are violently incomplete
+and probably not worth running. I may vibe some up later once I'm sorta happy with how any of this works.
 
 - [build-pipeline.yml](.github/workflows/build-pipeline.yml) will run pytest and linter on any open PRs
 - [validate.yml](.github/workflows/validate.yml) will run [node-diff](https://github.com/Comfy-Org/node-diff) to check for breaking changes
-
-## Publishing to Registry
-
-If you wish to share this custom node with others in the community, you can publish it to the registry. We've already auto-populated some fields in `pyproject.toml` under `tool.comfy`, but please double-check that they are correct.
-
-You need to make an account on https://registry.comfy.org and create an API key token.
-
-- [ ] Go to the [registry](https://registry.comfy.org). Login and create a publisher id (everything after the `@` sign on your registry profile). 
-- [ ] Add the publisher id into the pyproject.toml file.
-- [ ] Create an api key on the Registry for publishing from Github. [Instructions](https://docs.comfy.org/registry/publishing#create-an-api-key-for-publishing).
-- [ ] Add it to your Github Repository Secrets as `REGISTRY_ACCESS_TOKEN`.
-
-A Github action will run on every git push. You can also run the Github action manually. Full instructions [here](https://docs.comfy.org/registry/publishing). Join our [discord](https://discord.com/invite/comfyorg) if you have any questions!
-
