@@ -203,8 +203,8 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         images: torch.Tensor | None,  # [N, H, W, C]
         folder_name: str,
         latent: LatentInput,
-        video_id: LTXULID | None,
-        parent_id: LTXULID | None,
+        video_id: ULID | str | None,
+        parent_id: ULID | str | None,
         video_name: str,
         segment_idx: int,
         start_frame: int,

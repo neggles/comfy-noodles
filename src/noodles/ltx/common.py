@@ -74,18 +74,17 @@ class LTXULID(io.ComfyTypeIO):
             self,
             id: str,
             display_name: str = None,
-            optional=False,
+            optional: bool = True,
             tooltip: str = None,
             lazy: bool = None,
             default: str | ULID = None,
-            socketless: bool = None,
             force_input: bool = None,
-            extra_dict=None,
+            extra_dict: dict | None = None,
             raw_link: bool = None,
             advanced: bool = None,
         ):
             if isinstance(default, str):
-                default = parse_ulid(default)
+                default = parse_ulid(default, optional=True)
 
             super().__init__(
                 id,
@@ -94,7 +93,7 @@ class LTXULID(io.ComfyTypeIO):
                 tooltip,
                 lazy,
                 default,
-                socketless,
+                False,
                 None,
                 force_input,
                 extra_dict,
@@ -124,7 +123,6 @@ class LTXULIDPreviewNood(io.ComfyNode):
             ],
             outputs=[
                 LTXULID.Output(display_name="ULID"),
-                io.String.Output(display_name="ID prefix"),
             ],
             is_output_node=True,
             enable_expand=True,
@@ -141,7 +139,6 @@ class LTXULIDPreviewNood(io.ComfyNode):
 
         return io.NodeOutput(
             ulid,
-            ulid_str[:12],  # prefix is first 12 chars of ULID string
             ui=ui.PreviewText(ulid_str),
         )
 

@@ -3,6 +3,7 @@ name = "noodles"
 version = "0.1.0"
 description = "neggles custom comfy nodes."
 readme = "README.md"
+license = { file = "LICENSE.md" }
 authors = [
     { name = "Andi Powers-Holmes", email = "aholmes@omnom.net" },
 ]
@@ -19,9 +20,9 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/neggles/noodles"
-BugTracker = "https://github.com/neggles/noodles/issues"
-Documentation = "https://github.com/neggles/noodles/wiki"
+Repository = "https://github.com/neggles/comfy-noodles"
+BugTracker = "https://github.com/neggles/comfy-noodles/issues"
+Documentation = "https://github.com/neggles/comfy-noodles/wiki"
 
 [build-system]
 requires = ["uv_build>=0.10.4,<0.11.0"]
@@ -81,7 +82,7 @@ testpaths = [
 
 [tool.comfy]
 PublisherId = "neggles"
-DisplayName = "noodles"
-Icon = "🍜"
+DisplayName = "noodles (cursed)"
+Icon = "https://github.com/neggles/comfy-noodles/raw/refs/heads/main/assets/noodles.png"
 Tags = []
-Repository = "https://github.com/neggles/noodles"
+requires-comfyui = ">=0.15.0"
