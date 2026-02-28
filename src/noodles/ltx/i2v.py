@@ -3,7 +3,7 @@ from comfy.sd import VAE
 from comfy.utils import common_upscale
 from comfy_api.latest import LatentInput, io
 
-from .common import WindowFunc, get_decay_curve
+from .common import MaskStrategy, get_mask_decay_curve
 
 
 class LTXImg2VidInplaceNood(io.ComfyNode):
@@ -33,9 +33,9 @@ class LTXImg2VidInplaceNood(io.ComfyNode):
                     tooltip="Target strength for the final frame in a multi-frame overlap window.",
                 ),
                 io.Combo.Input(
-                    "decay_curve",
-                    options=WindowFunc,
-                    default=WindowFunc.NoWindow,
+                    "mask_strat",
+                    options=MaskStrategy,
+                    default=MaskStrategy.SolidMask,
                     tooltip="The curve/window function used to calculate strength decay across the overlap window",
                 ),
                 io.Int.Input(
@@ -59,7 +59,7 @@ class LTXImg2VidInplaceNood(io.ComfyNode):
         latent: LatentInput,
         num_frames: int,
         strength_min: float,
-        decay_curve: WindowFunc,
+        mask_strat: MaskStrategy,
         decay_start: int,
     ) -> io.NodeOutput:
 
@@ -94,7 +94,7 @@ class LTXImg2VidInplaceNood(io.ComfyNode):
             )
 
         # Get frame weights based on decay curve
-        frame_weights = get_decay_curve(decay_curve, num_frames, decay_start, w_min=strength_min)
+        frame_weights = get_mask_decay_curve(mask_strat, num_frames, decay_start, w_min=strength_min)
         print(f"I2V frame weights: {frame_weights}")
 
         frame_1_lat = vae.encode(encode_pixels[0:1])

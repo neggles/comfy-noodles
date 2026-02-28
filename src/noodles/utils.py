@@ -1,15 +1,33 @@
+import re
+from os import PathLike
 from pathlib import Path
 
 from folder_paths import get_output_directory
 from ulid import ULID
 
-
-def prune_dict(d: dict):
-    return {k: v for k, v in d.items() if v is not None}
+re_idx_pattern = re.compile(r"_[svi](\d{3,5})_", re.I)
 
 
 def get_output_dir_path() -> Path:
     return Path(get_output_directory())
+
+
+def get_next_file_idx(filepath: PathLike) -> int:
+    filepath = Path(filepath)
+    folder = filepath.parent
+    if not folder.exists():
+        return 1
+    max_idx = 0
+    for f in folder.iterdir():
+        if f.is_file() and f.stem.startswith(filepath.stem):
+            if match := re_idx_pattern.search(f.stem):
+                idx = int(match.group(1))
+                max_idx = max(max_idx, idx)
+    return max_idx + 1
+
+
+def prune_dict(d: dict):
+    return {k: v for k, v in d.items() if v is not None}
 
 
 def parse_ulid(

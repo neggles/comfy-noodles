@@ -2,6 +2,7 @@ from comfy_api.latest import ComfyExtension, io
 
 from .ltx import (
     LTXImg2VidInplaceNood,
+    LTXLat2VidPrepareSegmentNood,
     LTXLat2VidSegmentLoadNood,
     LTXLat2VidSegmentSaveNood,
     LTXULIDFromStrNood,
@@ -19,6 +20,7 @@ class NoodlesExtension(ComfyExtension):
             LTXImg2VidInplaceNood,
             LTXLat2VidSegmentLoadNood,
             LTXLat2VidSegmentSaveNood,
+            LTXLat2VidPrepareSegmentNood,
             LTXULIDPreviewNood,
             LTXULIDFromStrNood,
             StringIntAddNood,
