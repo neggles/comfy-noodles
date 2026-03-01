@@ -43,16 +43,24 @@ line-length = 140
 src = ["src", "tests"]
 target-version = "py312"
 
-# Add rules to ban exec/eval
+[tool.ruff.format]
+skip-magic-trailing-comma = false
+
 [tool.ruff.lint]
 select = [
-    "E4",  # ruff defaults, pycodestyle errors
-    "E7",  # ^^
-    "E9",  # ^^
-    "F",   # ruff defaults, pyflakes rules
-    "B",   # flake8-bugbear
-    "UP",  # pyupgrade rules
-    "PTH", # flake8-use-pathlib
+    "E4",   # ruff defaults, pycodestyle errors
+    "E7",   # ^^
+    "E9",   # ^^
+    "F",    # ruff defaults, pyflakes rules
+    "B",    # flake8-bugbear
+    "I",    # isort rules
+    "UP",   # pyupgrade rules
+    "EXE",  # flake8-executable (checks shebangs)
+    "PTH",  # flake8-use-pathlib (checks for os.path usage)
+    "S101", # do not use assert
+    "S102", # do not use exec/eval
+    "NPY",  # numpy rules
+    "PD",   # pandas rules
 ]
 ignore = [
     "E501", # line too long (handled by line-length)
@@ -71,6 +79,7 @@ inline-quotes = "double"
 [tool.ruff.lint.isort]
 force-wrap-aliases = true
 combine-as-imports = true
+known-first-party = ["noodles"]
 
 
 [tool.pytest.ini_options]
