@@ -17,6 +17,7 @@
             "source.fixAll.ruff": "explicit"
         }
     },
+    "python.analysis.exclude": ["**/node_modules", "**/__pycache__", "**/.*"],
 
     "[json]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode",
@@ -34,13 +35,18 @@
     },
 
     "[toml]": {
+        "editor.detectIndentation": false,
         "editor.defaultFormatter": "tamasfe.even-better-toml",
-        "editor.formatOnSave": true
+        "editor.formatOnSaveMode": "file",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4
     },
 
     "[javascript]": {
-        "editor.tabSize": 2,
         "editor.detectIndentation": false,
-        "editor.defaultFormatter": "vscode.typescript-language-features"
+        "editor.defaultFormatter": "vscode.typescript-language-features",
+        "editor.formatOnSaveMode": "file",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 2
     }
 }
