@@ -1,8 +1,7 @@
 import json
-import re
+
 import warnings
 from io import BytesIO
-from os import PathLike
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +11,6 @@ from comfy.utils import ProgressBar
 from folder_paths import get_input_directory, get_output_directory
 from PIL import Image
 from ulid import ULID
-
-re_idx_pattern = re.compile(r"_[svi](\d{3,5})_", re.I)
 
 
 def get_input_dir_path() -> Path:
@@ -43,20 +40,6 @@ def get_folders_in_outdir(depth: int = 2) -> list[str]:
         except ValueError:
             continue  # skip folders that can't be relativized for some reason
     return sorted(folders, key=lambda s: s.lower())
-
-
-def get_next_file_idx(filepath: PathLike) -> int:
-    filepath = Path(filepath)
-    folder = filepath.parent
-    if not folder.exists():
-        return 1
-    max_idx = 0
-    for f in folder.iterdir():
-        if f.is_file() and f.stem.startswith(filepath.stem):
-            if match := re_idx_pattern.search(f.stem):
-                idx = int(match.group(1))
-                max_idx = max(max_idx, idx)
-    return max_idx + 1
 
 
 def prune_dict(d: dict):
