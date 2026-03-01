@@ -14,6 +14,7 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "kornia>=0.8.1",
     "numpy>=2.2.6",
     "pydantic>=2.12.5",
     "python-ulid>=3.1.0",
@@ -53,7 +54,6 @@ select = [
     "E9",   # ^^
     "F",    # ruff defaults, pyflakes rules
     "B",    # flake8-bugbear
-    "I",    # isort rules
     "UP",   # pyupgrade rules
     "EXE",  # flake8-executable (checks shebangs)
     "PTH",  # flake8-use-pathlib (checks for os.path usage)

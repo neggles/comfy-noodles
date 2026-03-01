@@ -11,6 +11,7 @@ class LTXImg2VidInplaceNood(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LTXImg2VidInplaceNood",
+            display_name="LTX Img2Vid Inplace Nood",
             category="noodles/ltx",
             inputs=[
                 io.Vae.Input("vae"),

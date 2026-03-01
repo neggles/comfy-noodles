@@ -1,17 +1,13 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from noodles.extension import NoodlesExtension
+    from noodles import NoodlesExtension, comfy_entrypoint
 else:
-    from .src.noodles.extension import NoodlesExtension
+    from .src.noodles import NoodlesExtension, comfy_entrypoint
 
 __author__ = """Andi Powers-Holmes"""
 __email__ = "aholmes@omnom.net"
 __version__ = "0.1.0"
-
-
-async def comfy_entrypoint() -> NoodlesExtension:
-    return NoodlesExtension()
 
 
 WEB_DIRECTORY = "./web"

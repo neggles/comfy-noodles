@@ -14,7 +14,8 @@
         "editor.defaultFormatter": "charliermarsh.ruff",
         "editor.codeActionsOnSave": {
             "source.organizeImports.ruff": "explicit",
-            "source.fixAll.ruff": "explicit"
+            "source.fixAll.ruff": "explicit",
+            "source.fixAll.pylance": "never"
         }
     },
     "python.analysis.exclude": ["**/node_modules", "**/__pycache__", "**/.*"],

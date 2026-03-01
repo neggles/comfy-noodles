@@ -1,10 +1,10 @@
 const { app } = window.comfyAPI.app;
 
 app.registerExtension({
-  name: "Noodles.LTXULIDPreviewNood",
+  name: "Noodles.ULIDPreviewNood",
 
   async beforeRegisterNodeDef(nodeType, nodeData, comfApp) {
-    if (nodeData.name === "LTXULIDPreviewNood") {
+    if (nodeData.name === "ULIDPreviewNood") {
       let onNodeCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function () {
         onNodeCreated && onNodeCreated.apply(this, arguments);

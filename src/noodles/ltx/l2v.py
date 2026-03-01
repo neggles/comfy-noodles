@@ -1,75 +1,97 @@
 import json
+import re
 from datetime import UTC, datetime
 from hashlib import sha256
+from os import PathLike
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from comfy.comfy_types import FileLocator
-from comfy.utils import load_torch_file, save_torch_file
-from comfy_api.latest import LatentInput, io
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, computed_field
+from comfy.sd import VAE
+from comfy.utils import ProgressBar, load_torch_file, save_torch_file
+from comfy_api.latest import LatentInput, io, ui
+from comfy_extras.nodes_lt import get_noise_mask
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 from pydantic.types import AwareDatetime
 from ulid import ULID
 
-from noodles.utils import get_next_file_idx, get_output_dir_path, parse_ulid, prune_dict
+from noodles.utils import (
+    compress_image_tensor_webp,
+    decompress_image_tensor_webp,
+    get_folders_in_outdir,
+    get_next_file_idx,
+    get_output_dir_path,
+    parse_ulid,
+    prune_dict,
+)
 
 from .common import (
-    LTXULID,
     BootstrapMode,
+    ComfyULID,
     MaskParams,
-    MaskParamsIO,
     MaskStrategy,
     get_mask_decay_curve,
 )
-
-try:
-    from safetensors import safe_open
-except ImportError:
-    safe_open = None
+from .io import (
+    BootstrapModeIO,
+    MaskParamsIO,
+    MaskStrategyIO,
+)
 
 SEGMENT_METADATA_KEY = "ltx_l2v_segment"
+SEGMENT_FILENAME_RE = re.compile(r"\.s(?P<segment>\d+)_i(?P<iteration>\d+)$")
 
 
 class LTXLat2VidSegmentData(BaseModel):
     video_id: ULID = Field(default_factory=ULID)
-    segment_id: ULID = Field(default_factory=ULID)
     parent_id: ULID | None = None
+    segment_id: ULID = Field(default_factory=ULID)
 
     segment_idx: int = Field(default=0, min=0, description="Index of the segment within the video.")
     iteration: int = Field(default=0, min=0, description="Iteration number for this segment.")
-
-    n_latents_gen: int = Field(
-        ...,
-        min=2,
-        description="Number of latents stored in the latent tensor, including bootstrap.",
-    )
 
     start_frame: int = Field(
         ...,
         min=0,
         description="Global frame index for the start of this segment. Used for video assembly and overlap calculations.",
     )
-    num_frames: int = Field(
+    n_frames: int = Field(
         ...,
         min=1,
         description="Number of good frames in the frame tensor for this segment. Includes overlap at the start, "
         + "and the bootstrap frame for segment 0. start_frame + num_frames - overlap_frames = next segment's start_frame.",
+    )
+    n_frames_batch: int = Field(
+        ...,
+        min=1,
+        description="Number of frames generated for this segment, including overlap and bootstrap frame. Used to make future segments the same length.",
+    )
+
+    n_latents: int = Field(
+        ...,
+        min=2,
+        description="Number of latents stored in the latent tensor, inc. bootstrap, excl. discarded terminal (if enabled)",
+    )
+    overlap_k: int = Field(
+        6,
+        ge=2,
+        le=512,
+        description="Number of latents at the end of the segment that will be overlapped with the next segment.",
     )
     keep_bootstrap: bool = Field(
         False,
         description="if True, the first (bootstrap) frame in the frames tensor will be kept during video assembly. "
         + "Generally you only want to keep the bootstrap frame from segment 0.",
     )
-
-    overlap_k: int = Field(
-        6,
-        min=2,
-        description="Number of latents at the end of the segment that will be overlapped with the next segment.",
+    drop_last_latent: bool = Field(
+        True,
+        description="Whether to drop the last latent before saving. The last latent is usually low-quality and best discarded.",
     )
+
+    bootstrap_mode: BootstrapMode = BootstrapMode.DummyLatent
     mask_strat: MaskStrategy = MaskStrategy.SolidMask
     mask_params: MaskParams = Field(default_factory=MaskParams)
-    bootstrap_mode: BootstrapMode = BootstrapMode.DummyLatent
 
     video_name: str = Field(default="untitled", description="Video name for organization purposes.")
     subfolder: str = Field(..., description="Subfolder that this segment was saved in originally.")
@@ -82,66 +104,139 @@ class LTXLat2VidSegmentData(BaseModel):
     created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(tz=UTC))
 
     model_config: ConfigDict = ConfigDict(
-        extra="allow",
+        extra="ignore",
     )
 
-    @computed_field
-    @property
-    def overlap_frames(self) -> int:
-        """How many frames to subtract from num_frames to find the next segment's start frame, based on the number of overlapped latents."""
-        return (self.overlap_k - 1) * 8
+    @classmethod
+    def model_validate_any(
+        cls, value: Any, strict: bool = False, extra: bool = True, **kwargs
+    ) -> "LTXLat2VidSegmentData":
+        match value:
+            case cls():
+                return value
+            case str() if value.strip():
+                return cls.model_validate_json(value, strict=strict, extra=extra, **kwargs)
+            case dict():
+                return cls.model_validate(value, strict=strict, extra=extra, **kwargs)
+            case _:
+                raise TypeError(f"Unsupported segment metadata type: {type(value)!r}")
 
 
-@io.comfytype(io_type="LTX_LAT")
+@io.comfytype(io_type="LAT2VID_SEGMENT")
 class LTXLat2VidSegmentIO(io.ComfyTypeIO):
-    Type = LTXLat2VidSegmentData
+    if TYPE_CHECKING:
+        Type = LTXLat2VidSegmentData
 
-    class Input(io.Input): ...
+    class Input(io.Input):
+        pass
 
-    class Output(io.Output): ...
-
-
-def _resolve_segment_path(segment_path: str) -> Path:
-    if not segment_path.strip():
-        raise ValueError("segment_path is required")
-    path = Path(segment_path).expanduser()
-    if not path.is_absolute():
-        path = get_output_dir_path() / path
-    return path.resolve()
+    class Output(io.Output):
+        pass
 
 
-def _load_segment_file(segment_path: str) -> tuple[dict[str, torch.Tensor], str, Path]:
-    resolved_path = _resolve_segment_path(segment_path)
+def parse_segment_name(path: Path) -> tuple[int, int] | None:
+    match = SEGMENT_FILENAME_RE.search(path.stem)
+    if not match:
+        return None
+    return int(match.group("segment")), int(match.group("iteration"))
+
+
+def _segment_data_from_headers(raw_metadata: dict[str, str]) -> tuple[LTXLat2VidSegmentData, str]:
+    metadata_json = raw_metadata.get(SEGMENT_METADATA_KEY)
+    if not metadata_json:
+        raise ValueError(f"No '{SEGMENT_METADATA_KEY}' metadata found in checkpoint")
+
+    segment_data = LTXLat2VidSegmentData.model_validate_json(metadata_json)
+
+    update = {}
+    for key in ["prompt", "extra_pnginfo"]:
+        if key in raw_metadata and raw_metadata[key]:
+            update[key] = raw_metadata[key]
+    if update:
+        segment_data = segment_data.model_copy(update=update)
+
+    return segment_data, segment_data.model_dump_json()
+
+
+def load_segment_file(
+    segment_path: PathLike[str],
+) -> tuple[dict[str, torch.Tensor], LTXLat2VidSegmentData, str, Path]:
+    segment_path = Path(segment_path).expanduser()
+    if not segment_path.is_absolute():
+        segment_path = get_output_dir_path() / segment_path
+    resolved_path = segment_path.resolve()
+
     if not resolved_path.exists():
         raise FileNotFoundError(f"Segment file does not exist: {resolved_path}")
 
-    state_dict, metadata = load_torch_file(str(resolved_path), return_metadata=True)
+    state_dict, raw_metadata = load_torch_file(str(resolved_path), return_metadata=True)
+    segment_data, metadata_json = _segment_data_from_headers(raw_metadata)
+    return state_dict, segment_data, metadata_json, resolved_path
 
-    return state_dict, metadata, resolved_path
+
+def _find_segment_file(video_folder: str, segment_idx: int, iteration: int) -> Path:
+    output_root = get_output_dir_path()
+    folder_path = output_root / video_folder
+    if not folder_path.exists() or not folder_path.is_dir():
+        raise FileNotFoundError(f"Subfolder does not exist: {folder_path}")
+
+    candidates: list[tuple[int, Path]] = []
+    for path in folder_path.glob("*.safetensors"):
+        ids = parse_segment_name(path)
+        if not ids:
+            continue
+        seg_idx, seg_iter = ids
+        if seg_idx == segment_idx:
+            candidates.append((seg_iter, path))
+
+    if not candidates:
+        raise FileNotFoundError(f"No segment files found for segment_idx={segment_idx} in {folder_path}")
+
+    candidates.sort(key=lambda item: item[0])
+
+    if iteration <= 0:
+        return candidates[-1][1]
+
+    for seg_iter, path in candidates:
+        if seg_iter == iteration:
+            return path
+
+    available = ", ".join(str(seg_iter) for seg_iter, _ in candidates)
+    raise FileNotFoundError(
+        f"No segment file found for segment_idx={segment_idx}, iteration={iteration}. Available iterations: {available}"
+    )
 
 
 def _compute_overlap_strengths(
     total_k: int,
     bootstrap_mode: BootstrapMode,
-    mask_strat: MaskStrategy,
-    mask_params: MaskParams,
+    bootstrap_strength: float | None = None,
+    mask_strat: MaskStrategy = ...,
+    mask_params: MaskParams = ...,
 ) -> list[float]:
-    """
-    Compute the strength values for each latent in the overlap region.
-    """
+    if total_k < 2:
+        raise ValueError("total_k must be at least 2")
+
     match bootstrap_mode:
         case BootstrapMode.SegmentZero:
-            raise ValueError("Segment zero doesn't have strengths since it's a normal I2V segment.")
+            raise ValueError("SegmentZero bootstrap mode is invalid for continuation segments")
         case BootstrapMode.RawLatent:
-            strength = [1.0] * total_k
-        case BootstrapMode.DummyLatent | BootstrapMode.VAERoundtrip:
-            strength = get_mask_decay_curve(
-                mask_strat,
-                total_k=total_k,
-                **mask_params.model_dump(include=["hard_mask_k", "w_max", "w_min", "decay_sigma"]),
-            )
-        case _:
-            raise ValueError(f"Unknown bootstrap mode: {bootstrap_mode}")
+            return [bootstrap_strength if bootstrap_strength is not None else 1.0] * total_k
+        case BootstrapMode.DummyLatent:
+            # For Dummy Latent continuation, bootstrap latent should be freely diffused (strength 0.0)
+            bootstrap_strength = bootstrap_strength if bootstrap_strength is not None else 0.0
+        case BootstrapMode.VAERoundtrip:
+            # For VAE Roundtrip, the bootstrap latent is a VAE roundtrip of the last frame and may be somewhat noisy/artifacted,
+            # so we give it a moderate strength to allow some correction while still being anchored to the source.
+            bootstrap_strength = bootstrap_strength if bootstrap_strength is not None else 0.5
+
+    # and overlap latents should be masked according to selected strategy.
+    overlap_strengths = get_mask_decay_curve(
+        mask_strat,
+        total_k=total_k - 1,
+        **mask_params.model_dump(include={"hard_mask_k", "w_max", "w_min", "decay_sigma"}),
+    )
+    return [bootstrap_strength, *overlap_strengths]
 
 
 def _deterministic_seed(
@@ -157,18 +252,6 @@ def _deterministic_seed(
     return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
 
-def unpack_mask_strategy_input(mask_strat: dict) -> tuple[MaskStrategy, MaskParams]:
-    """Unpack the MaskStrategy dynamiccombo input into the selected strategy
-    and a MaskParams dataclass containing the relevant parameters for that strategy.
-    """
-    selected_strat: MaskStrategy = mask_strat["mask_strat"]
-    if selected_strat not in MaskStrategy:
-        raise ValueError(f"Unknown mask strategy: {selected_strat}")
-
-    mask_params = MaskParams(**mask_strat)
-    return selected_strat, mask_params
-
-
 class LTXLat2VidSegmentSaveNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -181,27 +264,30 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                 io.Image.Input(
                     "images",
                     display_name="frames",
-                    optional=True,
-                    tooltip="Frames for this segment, including overlap. Overlap will be trimmed before passing to output.",
+                    optional=False,
+                    tooltip="Frames for this segment, including overlap. Overlap will be trimmed before saving.",
                 ),
                 io.String.Input(
                     "subfolder",
                     display_name="Folder Name",
+                    multiline=False,
                     default="ltx/{video_name}_{video_id}",
                     tooltip="Folder prefix for the saved segment data. Can include placeholders for video_name, "
                     + " and video_id. Segment index, segment ID, and iteration will be appended automatically.",
                 ),
                 io.Latent.Input("latent", tooltip="The latents for this segment"),
-                LTXULID.Input(
+                ComfyULID.Input(
                     "video_id",
                     optional=True,
                     default=None,
+                    force_input=True,
                     tooltip="Optional video ID. If not provided, a new one will be generated.",
                 ),
-                LTXULID.Input(
+                ComfyULID.Input(
                     "parent_id",
                     optional=True,
                     default=None,
+                    force_input=True,
                     tooltip="Optional parent segment ID for hierarchical video structuring",
                 ),
                 io.String.Input(
@@ -229,7 +315,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                     display_name="Frame Count",
                     default=1,
                     min=1,
-                    tooltip="The number of frames generated for this run (including overlap, excluding bootstrap)",
+                    tooltip="The number of frames generated for this run (including overlap)",
                 ),
                 io.Int.Input(
                     "overlap_k",
@@ -240,16 +326,19 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                 ),
                 io.Boolean.Input(
                     "drop_last_latent",
-                    display_name="Drop Last Latent",
+                    display_name="Last Latent",
                     default=True,
+                    label_on="Drop",
+                    label_off="Keep",
                     tooltip="Whether to drop the last latent before saving. The last latent is usually low-quality and best discarded.",
                 ),
-                MaskStrategy.Input("mask_strat", display_name="Mask Strategy"),
-                BootstrapMode.Input("bootstrap_mode", display_name="Bootstrap Mode"),
+                BootstrapModeIO.Input("bootstrap_mode", default=BootstrapMode.DummyLatent),
+                MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
+                MaskParamsIO.Input("mask_params"),
             ],
             outputs=[
-                io.String.Output(display_name="video_id"),
-                io.String.Output(display_name="segment_id"),
+                ComfyULID.Output(display_name="video_id"),
+                ComfyULID.Output(display_name="segment_id"),
                 io.String.Output(display_name="segment_path"),
                 io.String.Output(display_name="metadata_json"),
                 io.String.Output(
@@ -271,27 +360,32 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
     @classmethod
     def execute(
         cls,
-        images: torch.Tensor | None,  # [N, H, W, C]
-        subfolder: str = ...,
-        latent: LatentInput = ...,
-        video_id: ULID | str | None = None,
-        parent_id: ULID | str | None = None,
-        video_name: str = ...,
-        segment_idx: int = ...,
-        start_frame: int = ...,
-        num_frames: int = ...,
-        overlap_k: int = ...,
-        drop_last_latent: bool = ...,
-        mask_strat: dict = ...,
-        bootstrap_mode: BootstrapMode = ...,
+        images: torch.Tensor,
+        subfolder: str,
+        latent: LatentInput,
+        video_id: ULID | str | None,
+        parent_id: ULID | str | None,
+        video_name: str,
+        segment_idx: int,
+        start_frame: int,
+        num_frames: int,
+        overlap_k: int,
+        drop_last_latent: bool,
+        bootstrap_mode: BootstrapMode,
+        mask_strat: MaskStrategy,
+        mask_params: MaskParams,
     ) -> io.NodeOutput:
+        if not isinstance(mask_params, MaskParams):
+            mask_params = MaskParams.model_validate(mask_params, extra="ignore", strict=False)
+        if not isinstance(bootstrap_mode, BootstrapMode):
+            bootstrap_mode = BootstrapMode(bootstrap_mode)
+        if not isinstance(mask_strat, MaskStrategy):
+            mask_strat = MaskStrategy(mask_strat)
 
-        # Generate IDs where required.
         video_ulid = parse_ulid(video_id, "video_id", optional=True) or ULID()
         parent_ulid = parse_ulid(parent_id, "parent_id", optional=True)
         segment_id = ULID()
 
-        # Construct folder prefix from template placeholders.
         try:
             subfolder = subfolder.format(
                 video_name=video_name,
@@ -303,85 +397,77 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             raise ValueError(f"Unknown placeholder in subfolder template: {exc}") from exc
 
         filename_prefix = f"{video_name}.v{str(video_ulid)[:10]}.s{segment_idx:03d}"
-
-        # Get output target path and create a unique safetensors filename.
         output_root = get_output_dir_path()
         counter = get_next_file_idx(output_root / subfolder / f"{filename_prefix}.safetensors")
 
-        # add counter and segment ID suffix
-        segment_suffix = f"i{counter:03d}"
-
-        output_dir = output_root.joinpath(subfolder)
-        filename = f"{filename_prefix}_{segment_suffix}.safetensors"
+        filename = f"{filename_prefix}_i{counter:03d}.safetensors"
+        output_dir = output_root / subfolder
         output_path = output_dir / filename
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         frames_prefix = f"{subfolder}/{output_path.stem}/frame_"
         video_prefix = f"{subfolder}/{output_path.stem}/video_"
 
-        # get samples from latent (dont care about noise mask)
-        samples: torch.Tensor = latent["samples"]  # shape [B, C, T, H, W]
-        num_latents = samples.shape[2]
+        samples: torch.Tensor = latent["samples"]
+        if samples.ndim != 5:
+            raise ValueError(f"Expected latent['samples'] with shape [B,C,T,H,W], got {samples.shape!r}")
 
-        # Extract mask strategy and its various options
-        mask_strat, mask_params = unpack_mask_strategy_input(mask_strat)
-
-        # Work out which frames in the batch to extract, accounting for overlap and bootstrap latents
-        match bootstrap_mode:
-            case BootstrapMode.RawLatent:
-                img_start = 0
-            case BootstrapMode.DummyLatent | BootstrapMode.VAERoundtrip:
-                img_start = 1
-            case _:
-                raise ValueError(f"Unknown bootstrap strategy: {bootstrap_mode}")
-
-        # always pull every frame from segment 0
-        if segment_idx == 0:
-            img_start = 0
-            img_end = (num_latents * 8) + 1
-
-        img_end = (num_latents - overlap_k) * 8
         if drop_last_latent:
-            img_end -= 8
+            if samples.shape[2] <= 1:
+                raise ValueError("Cannot drop terminal latent when only one latent is present")
+            samples = samples[:, :, :-1, :, :]
+            images = images[:-8]
+            num_frames -= 8
 
-        # calculate global end frame
-        end_frame = start_frame + (img_end - img_start)
-        # get the frames we're actually going to end up using
-        save_images = images[img_start:img_end]
-        # and the dimensions in pixels for metadata purposes
-        width_px, height_px = save_images.shape[2], save_images.shape[1]
+        if segment_idx == 0:
+            bootstrap_frame = images[:1]
+            save_images = images
+        else:
+            bootstrap_frame = images[:1]
+            save_images = images[1:]
 
-        # get "hidden" parameter values
-        prompt_info = cls.hidden.prompt or {}
+        width_px = int(save_images.shape[2])
+        height_px = int(save_images.shape[1])
+
+        prompt_info = prune_dict(cls.hidden.prompt or {})
         extra_pnginfo = prune_dict(cls.hidden.extra_pnginfo or {})
 
-        # build our metadata object
+        n_latents_gen = int(samples.shape[2])
+        n_frames_gen = int(save_images.shape[0])
+
         metadata = LTXLat2VidSegmentData(
             video_id=video_ulid,
             parent_id=parent_ulid,
             segment_id=segment_id,
             segment_idx=segment_idx,
             iteration=counter,
-            num_latents=num_latents,
-            width_px=width_px,
-            height_px=height_px,
+            n_latents_gen=n_latents_gen,
+            n_frames_gen=n_frames_gen,
             start_frame=start_frame,
-            start_idx=img_start,
             num_frames=num_frames,
             overlap_k=overlap_k,
+            drop_last_latent=drop_last_latent,
             mask_strat=mask_strat,
             mask_params=mask_params,
             bootstrap_mode=bootstrap_mode,
             video_name=video_name,
             subfolder=subfolder,
+            width_px=width_px,
+            height_px=height_px,
             prompt=prompt_info,
             extra_pnginfo=extra_pnginfo,
         )
 
-        output = {}
-        output["latent_tensor"] = samples.cpu().contiguous()
-        output["image_tensor"] = save_images.cpu().contiguous()
-        output["ltx_l2v_format_v0"] = torch.tensor([])
+        compressed_frames = compress_image_tensor_webp(save_images)
+        compressed_bootstrap = compress_image_tensor_webp(bootstrap_frame)
+
+        output = {
+            "latent": samples.cpu().contiguous(),
+            "bootstrap_latent": samples[:, :, :1, :, :].cpu().contiguous(),
+            "compressed_frames": compressed_frames.cpu().contiguous(),
+            "compressed_bootstrap": compressed_bootstrap.cpu().contiguous(),
+            "ltx_l2v_format_v0": torch.tensor([]),
+        }
         save_torch_file(
             output,
             output_path,
@@ -392,8 +478,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             },
         )
 
-        results: list[FileLocator] = []
-        results.append({"filename": filename, "subfolder": subfolder, "type": "output"})
+        results: list[FileLocator] = [{"filename": filename, "subfolder": subfolder, "type": "output"}]
 
         return io.NodeOutput(
             str(video_ulid),
@@ -417,241 +502,390 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
             inputs=[
                 io.Combo.Input(
                     "video_folder",
-                    upload=io.UploadType.image,
-                    image_folder=io.FolderType.output,
-                    remote=io.RemoteOptions(
-                        route="/internal/files/output",
-                        refresh_button=True,
-                        control_after_refresh="last",
-                    ),
-                )
-            ],
-            outputs=[
-                io.Latent.Output(display_name="latent"),
-                LTXLat2VidSegmentIO.Output(display_name="segment_data"),
-                io.String.Output(display_name="metadata_json"),
-                LTXULID.Input(
-                    "video_id",
-                    optional=True,
-                    default=None,
-                    tooltip="Video ID loaded from the segment file metadata.",
+                    options=get_folders_in_outdir(depth=2),
+                    tooltip="Subfolder to load segments from. Can be connected to save node's 'subfolder' output.",
                 ),
-                LTXULID.Input(
-                    "segment_id",
-                    optional=True,
-                    default=None,
-                    tooltip="Segment ID loaded from the segment file metadata, for use as parent_id for next segment.",
-                ),
-                io.Int.Output(display_name="segment_idx"),
-                io.Int.Output(display_name="next_segment_idx"),
-                io.Int.Output(display_name="start_frame"),
-                io.Int.Output(display_name="end_frame"),
-                io.Int.Output(display_name="overlap_k"),
-                io.Boolean.Output(display_name="drop_last_latent"),
-                io.Combo.Output(display_name="bootstrap_mode", options=BootstrapMode),
-                io.Combo.Output(display_name="mask_strat", options=MaskStrategy),
-            ],
-        )
-
-    @classmethod
-    def fingerprint_inputs(cls, **kwargs):
-        return super().fingerprint_inputs(**kwargs)
-
-    @classmethod
-    def execute(
-        cls,
-        segment_path: str,
-    ) -> io.NodeOutput:
-        state_dict, metadata_json, _ = _load_segment_file(segment_path)
-        if "latent_tensor" not in state_dict:
-            raise ValueError("Segment file is missing required 'latent_tensor' tensor")
-
-        segment_data = LTXLat2VidSegmentData.model_validate_json(metadata_json)
-
-        samples = state_dict["latent_tensor"]
-        latent_output: dict[str, torch.Tensor] = {"samples": samples}
-        if "noise_mask" in state_dict:
-            latent_output["noise_mask"] = state_dict["noise_mask"]
-
-        parent_id = str(segment_data.parent_id) if segment_data.parent_id else ""
-        segment_idx = segment_data.segment_idx
-        next_segment_idx = segment_idx + 1
-
-        return io.NodeOutput(
-            latent_output,
-            segment_data,
-            metadata_json,
-            str(segment_data.video_id),
-            str(segment_data.segment_id),
-            parent_id,
-            segment_idx,
-            next_segment_idx,
-            int(segment_data.start_frame),
-            int(segment_data.end_frame),
-            int(segment_data.overlap_k),
-            bool(segment_data.drop_last_latent),
-            str(segment_data.bootstrap_mode),
-            str(segment_data.mask_strat),
-        )
-
-
-class LTXLat2VidPrepareSegmentNood(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="LTXLat2VidPrepareSegmentNood",
-            display_name="LTX Prepare Next Segment Latents",
-            category="noodles/ltx",
-            inputs=[
                 io.Int.Input(
-                    "noise_seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, control_after_generate=True
+                    "segment_idx",
+                    default=0,
+                    min=0,
+                    tooltip="Segment index to load.",
                 ),
-                io.Latent.Input(
-                    "latent", display_name="Latent", tooltip="Empty latent tensor for this segment."
-                ),
-                io.Latent.Input("prev_latent"),
-                LTXLat2VidSegmentIO.Input("prev_segment_data"),
-                io.Int.Input(
-                    "overlap_k",
-                    default=6,
-                    min=1,
-                    max=512,
-                    tooltip="Number of overlapped latents to carry into the next segment.",
-                ),
-                io.Boolean.Input(
-                    "drop_last_latent",
-                    default=True,
-                    tooltip="Drop the final latent from the previous segment before selecting overlap latents.",
-                ),
-                BootstrapMode.Input(
-                    "bootstrap_mode",
-                    display_name="Bootstrap Strategy",
-                    default=BootstrapMode.DummyLatent,
-                    tooltip="Strategy for generating the initial latent frame on segments after the first.",
-                ),
-                MaskStrategy.Input(
-                    "mask_strat",
-                    display_name="Mask Strategy",
-                    options=MaskStrategy,
-                ),
-                MaskParamsIO.Input("mask_params", display_name="Mask Params"),
                 io.Int.Input(
                     "iteration",
                     default=0,
                     min=0,
-                    tooltip="Iteration index for next save; use 0 for a fresh segment branch.",
+                    tooltip="Iteration index to load. 0 loads the latest iteration for the segment.",
                 ),
             ],
             outputs=[
-                io.Latent.Output(display_name="next_latent"),
-                io.String.Output(display_name="mask_strengths_json"),
-                LTXLat2VidSegmentIO.Output(display_name="next_segment_data"),
-                io.String.Output(display_name="next_segment_data_json"),
+                io.Latent.Output(display_name="latent"),
+                io.Image.Output(display_name="frames"),
+                LTXLat2VidSegmentIO.Output(display_name="metadata"),
             ],
         )
 
     @classmethod
     def execute(
         cls,
-        prev_latent: LatentInput,
-        prev_segment_data: LTXLat2VidSegmentData,
-        overlap_k: int,
-        drop_last_latent: bool,
-        bootstrap_mode: BootstrapMode,
-        mask_strat: MaskStrategy,
-        windomask_strat: MaskStrategy,
-        mask_params: MaskParams,
+        video_folder: str,
+        segment_idx: int,
         iteration: int,
     ) -> io.NodeOutput:
-        prev_samples = prev_latent["samples"]
-        if prev_samples.ndim != 5:
+        segment_path = _find_segment_file(video_folder, segment_idx, iteration)
+        state_dict, raw_metadata = load_segment_file(segment_path)
+
+        segment_data = LTXLat2VidSegmentData.model_validate_json(
+            raw_metadata[SEGMENT_METADATA_KEY], extra="ignore", strict=False
+        )
+
+        if "latent" not in state_dict:
+            raise ValueError("Segment file is missing required 'latent' tensor")
+        if "frames" not in state_dict:
+            raise ValueError("Segment file is missing required 'frames' tensor")
+
+        samples = state_dict["latent"].cpu().contiguous()
+        frames = state_dict["frames"].cpu().contiguous()
+
+        # decompress from webp bytes
+        if frames.ndim == 2:
+            pbar = ProgressBar(total=frames.shape[0])
+            frames = decompress_image_tensor_webp(
+                frames, (segment_data.width_px, segment_data.height_px), as_float=True, pbar=pbar
+            )
+        latent: dict[str, torch.Tensor] = {"samples": samples}
+
+        return io.NodeOutput(
+            latent,
+            frames,
+            segment_data,
+        )
+
+
+class LTXLat2VidInplaceNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXLat2VidInplaceNood",
+            display_name="LTX Lat2Vid Inplace",
+            category="noodles/ltx",
+            inputs=[
+                io.Vae.Input("vae", optional=True),
+                io.Int.Input(
+                    "noise_seed",
+                    display_name="Noise Seed",
+                    default=0,
+                    min=0,
+                    max=0xFFFFFFFFFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed for the deterministic seed generator.",
+                ),
+                io.Latent.Input(
+                    "latent",
+                    tooltip="Empty latent tensor for this segment.",
+                ),
+                io.Latent.Input(
+                    "prev_latent",
+                    tooltip="Latent tensor from previous segment.",
+                ),
+                LTXLat2VidSegmentIO.Input(
+                    "prev_metadata",
+                    display_name="metadata",
+                    tooltip="Metadata from the previous segment.",
+                ),
+                io.Int.Input(
+                    "overlap_k",
+                    default=6,
+                    min=2,
+                    max=512,
+                    tooltip="Number of overlapped latents to carry into the next segment.",
+                ),
+                io.Combo.Input("bootstrap_mode", options=BootstrapMode, default=BootstrapMode.DummyLatent),
+                io.Float.Input(
+                    "bootstrap_strength",
+                    default=1.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    display_name="strength",
+                    tooltip="Strength of the bootstrap frame when doing inplace I2V. Should be 1.0 most of the time.",
+                ),
+                io.Combo.Input("mask_strat", options=MaskStrategy, default=MaskStrategy.CosineDecayV1),
+                MaskParamsIO.Input("mask_params", optional=True),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="noise_seed"),
+                LTXLat2VidSegmentIO.Output(display_name="metadata"),
+                io.Int.Output(display_name="start_frame"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        vae: VAE | None,
+        noise_seed: int,
+        latent: LatentInput,
+        prev_latent: LatentInput,
+        prev_metadata: LTXLat2VidSegmentData | str,
+        overlap_k: int,
+        bootstrap_mode: BootstrapMode,
+        bootstrap_strength: float,
+        mask_strat: MaskStrategy,
+        mask_params: MaskParams | dict | None,
+    ) -> io.NodeOutput:
+        prev_segment_data = LTXLat2VidSegmentData.model_validate_any(prev_metadata)
+
+        prev_samples: torch.Tensor = prev_latent["samples"]
+        next_samples: torch.Tensor = latent["samples"]
+
+        if prev_samples.ndim != 5 or next_samples.ndim != 5:
             raise ValueError(
-                f"Expected prev_latent['samples'] to have shape [B,C,T,H,W], got {prev_samples.shape!r}"
+                f"Expected both prev and next latent samples to have shape [B,C,T,H,W], got {prev_samples.shape!r} and {next_samples.shape!r}"
             )
 
-        usable_samples = prev_samples
-        if drop_last_latent and prev_samples.shape[2] > 1:
-            usable_samples = prev_samples[:, :, :-1, :, :]
+        if overlap_k < 2:
+            raise ValueError("overlap_k must be at least 2")
+        if next_samples.shape[2] < overlap_k:
+            raise ValueError(f"next_latent has {next_samples.shape[2]} latents but overlap_k is {overlap_k}")
 
-        usable_latents = int(usable_samples.shape[2])
-        if usable_latents < 1:
-            raise ValueError("No usable latents left after applying drop_last_latent.")
+        if prev_samples.shape[2] < overlap_k:
+            raise ValueError(
+                f"prev_latent has {prev_samples.shape[2]} usable latents but overlap_k is {overlap_k}"
+            )
 
-        overlap_count = min(int(overlap_k), usable_latents)
-        overlap = usable_samples[:, :, usable_latents - overlap_count :, :, :].clone()
+        overlap_chunk = prev_samples[:, :, -overlap_k:, :, :].clone()
+        source_latent = overlap_chunk[:, :, 0:1, :, :]
+        carried_latents = overlap_chunk[:, :, 1:, :, :]
 
-        if bootstrap_mode == BootstrapMode.NoBootstrap:
-            next_samples = overlap
-        else:
-            seed = _deterministic_seed(prev_segment_data, int(iteration), overlap_count)
-            rng = torch.Generator(device=overlap.device.type)
-            rng.manual_seed(seed)
-            if overlap.shape[2] >= 1:
-                latent1 = overlap[:, :, 0:1, :, :]
-                if bootstrap_mode == BootstrapMode.VAERoundtrip:
-                    bootstrap_latent = latent1.clone()
-                else:
-                    noise = torch.randn(
-                        latent1.shape, dtype=latent1.dtype, device=latent1.device, generator=rng
-                    )
-                    bootstrap_latent = latent1 + float(noise_sigma) * noise
+        if bootstrap_mode == BootstrapMode.SegmentZero:
+            raise ValueError(
+                "BootstrapMode.SegmentZero is only valid for the first segment and cannot be used for continuation"
+            )
+
+        new_seed = _deterministic_seed(prev_segment_data, seed=noise_seed, overlap_count=overlap_k)
+
+        if bootstrap_mode == BootstrapMode.RawLatent:
+            bootstrap_latent = source_latent
+        elif bootstrap_mode == BootstrapMode.DummyLatent:
+            bootstrap_latent = next_samples[:, :, :1, :, :].clone()
+        elif bootstrap_mode == BootstrapMode.VAERoundtrip:
+            if vae is None:
+                raise ValueError("VAE is required for BootstrapMode.VAERoundtrip")
+            decoded = vae.decode(source_latent)
+            if decoded.ndim == 4:
+                # Expected image decode shape [N,H,W,C]
+                last_frame = decoded[-1:, :, :, :3]
             else:
-                bootstrap_latent = torch.randn(
-                    usable_samples[:, :, 0:1, :, :].shape,
-                    dtype=usable_samples.dtype,
-                    device=usable_samples.device,
-                    generator=rng,
-                )
-            next_samples = torch.cat([bootstrap_latent, overlap], dim=2)
+                raise ValueError(f"Unexpected decoded latent shape from VAE: {decoded.shape!r}")
 
-        total_latents = int(next_samples.shape[2])
+            encoded = vae.encode(last_frame)
+            if encoded.ndim == 4:
+                encoded = encoded.unsqueeze(2)
+            if encoded.ndim != 5:
+                raise ValueError(f"Unexpected encoded latent shape from VAE: {encoded.shape!r}")
+
+            bootstrap_latent = encoded[:, :, :1, :, :]
+        else:
+            raise ValueError(f"Unknown bootstrap mode: {bootstrap_mode}")
+
+        next_samples[:, :, 0:1, :, :] = bootstrap_latent
+        next_samples[:, :, 1:overlap_k, :, :] = carried_latents[:, :, : overlap_k - 1, :, :]
+
         strengths = _compute_overlap_strengths(
-            total_latents=total_latents,
-            overlap_k=overlap_count,
-            hard_mask_k=mask_params.hard_mask_k,
-            noise_sigma=noise_sigma,
+            total_k=overlap_k,
             bootstrap_mode=bootstrap_mode,
+            bootstrap_strength=bootstrap_strength,
             mask_strat=mask_strat,
-            windomask_strat=windomask_strat,
+            mask_params=mask_params,
         )
 
-        strength_tensor = torch.tensor(strengths, dtype=next_samples.dtype, device=next_samples.device)
-        strength_tensor = strength_tensor.view(1, 1, total_latents, 1, 1).repeat(
-            next_samples.shape[0], 1, 1, 1, 1
+        noise_mask = torch.ones(
+            (next_samples.shape[0], 1, next_samples.shape[2], 1, 1),
+            dtype=next_samples.dtype,
+            device=next_samples.device,
         )
-        noise_mask = 1.0 - strength_tensor
+        strengths_tensor = torch.tensor(strengths, dtype=next_samples.dtype, device=next_samples.device)
+        noise_mask[:, :, :overlap_k, :, :] = 1.0 - strengths_tensor.view(1, 1, overlap_k, 1, 1)
 
-        next_num_frames = 1 + max(0, (total_latents - 1) * 8)
-        next_start_frame = int(prev_segment_data.end_frame)
-        next_end_frame = next_start_frame + next_num_frames
-        next_segment_data = LTXLat2VidSegmentData(
-            video_id=prev_segment_data.video_id,
-            parent_id=prev_segment_data.segment_id,
-            segment_id=ULID(),
-            segment_idx=int(prev_segment_data.segment_idx) + 1,
-            iteration=max(0, int(iteration)),
-            latent_shape=tuple(next_samples.shape),
-            num_latents=total_latents,
-            start_frame=next_start_frame,
-            end_frame=next_end_frame,
-            num_frames=next_num_frames,
-            overlap_k=overlap_count,
-            drop_last_latent=drop_last_latent,
-            mask_strat=mask_strat,
-            bootstrap_mode=bootstrap_mode,
-            video_name=prev_segment_data.video_name,
-            subfolder=prev_segment_data.subfolder,
-            prompt=dict(prev_segment_data.prompt),
-            extra_pnginfo=dict(prev_segment_data.extra_pnginfo),
+        next_segment_idx = int(prev_segment_data.segment_idx) + 1
+        next_start_frame = (
+            int(prev_segment_data.start_frame) + int(prev_segment_data.num_frames) - (8 * (overlap_k - 1))
         )
 
-        next_latent: dict[str, torch.Tensor] = {
+        next_metadata = prev_segment_data.model_copy(
+            update={
+                "parent_id": prev_segment_data.segment_id,
+                "segment_id": ULID(),
+                "segment_idx": next_segment_idx,
+                "start_frame": next_start_frame,
+                "overlap_k": overlap_k,
+                "mask_strat": mask_strat,
+                "mask_params": mask_params,
+                "bootstrap_mode": bootstrap_mode,
+            }
+        )
+
+        out_latent: dict[str, torch.Tensor] = {
             "samples": next_samples,
             "noise_mask": noise_mask,
         }
         return io.NodeOutput(
-            next_latent,
-            json.dumps(strengths),
-            next_segment_data,
-            next_segment_data.model_dump_json(),
+            out_latent,
+            next_metadata,
+            new_seed,
         )
+
+
+class LTXLat2VidGetNextSegmentDataNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXLat2VidGetNextSegmentDataNood",
+            display_name="LTX Lat2Vid Next Segment Data",
+            category="noodles/ltx",
+            inputs=[
+                LTXLat2VidSegmentIO.Input(
+                    id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"
+                ),
+            ],
+            outputs=[
+                MaskParamsIO.Output(display_name="mask_params"),
+                io.Int.Output(display_name="overlap_k"),
+                BootstrapModeIO.Output(display_name="bootstrap_mode"),
+                MaskStrategyIO.Output(display_name="mask_strat"),
+                io.String.Output(display_name="subfolder"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, metadata: LTXLat2VidSegmentData) -> io.NodeOutput:
+        return io.NodeOutput(
+            metadata.mask_params,
+            metadata.overlap_k,
+            metadata.bootstrap_mode,
+            metadata.mask_strat,
+        )
+
+
+class LTXLat2VidGetNextSegmentSaveDataNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXLat2VidGetNextSegmentSaveDataNood",
+            display_name="LTX Lat2Vid Next Segment Save Data",
+            category="noodles/ltx",
+            inputs=[
+                LTXLat2VidSegmentIO.Input(
+                    id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"
+                ),
+            ],
+            outputs=[
+                MaskParamsIO.Output(display_name="mask_params"),
+                ComfyULID.Output(display_name="video_id"),
+                ComfyULID.Output(display_name="parent_id"),
+                io.String.Output(display_name="subfolder"),
+                io.String.Output(display_name="video_name"),
+                io.Int.Output(display_name="segment_idx"),
+                io.Int.Output(display_name="start_frame"),
+                io.Int.Output(display_name="n_frames_batch"),
+                io.Int.Output(display_name="overlap_k"),
+                BootstrapModeIO.Output(display_name="bootstrap_mode"),
+                MaskStrategyIO.Output(display_name="mask_strat"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, metadata: LTXLat2VidSegmentData) -> io.NodeOutput:
+        # work out the last frame index of the current segment so we can calculate the next segment's start frame
+        last_end_frame = metadata.start_frame + metadata.n_frames
+        # calculate how many frames of overlap, accounting for the first overlapped latent only actually counting for one frame of overlap
+        n_overlap_frames = (metadata.overlap_k * 8) - 7
+        # the next segment should start right after the non-overlapped frames of the previous segment
+        next_start_frame = last_end_frame - n_overlap_frames
+
+        # increment segment idx for the next segment
+        next_segment_idx = metadata.segment_idx + 1
+
+        return io.NodeOutput(
+            metadata.mask_params,
+            metadata.video_id,
+            metadata.segment_id,
+            metadata.subfolder,
+            metadata.video_name,
+            next_segment_idx,
+            next_start_frame,
+            metadata.n_frames_batch,
+            metadata.overlap_k,
+            metadata.bootstrap_mode,
+            metadata.mask_strat,
+        )
+
+
+class LTXMaskParamsNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXMaskParamsNood",
+            display_name="LTX Mask Params",
+            category="noodles/ltx",
+            inputs=[
+                MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
+                io.Int.Input(
+                    "hard_mask_k",
+                    default=2,
+                    min=1,
+                    max=32,
+                    tooltip="Number of overlapped latents to hard-mask at strength 1.0 before decay.",
+                ),
+                io.Float.Input(
+                    "w_max",
+                    default=1.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    display_name="w_max",
+                    tooltip="Maximum strength for the final latent in the overlap window.",
+                ),
+                io.Float.Input(
+                    "w_min",
+                    default=0.2,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    display_name="w_min",
+                    tooltip="Minimum strength for the final latent in the overlap window.",
+                ),
+                io.Float.Input(
+                    "decay_sigma",
+                    default=0.4,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    tooltip="Sigma for half-Gaussian decay curve.",
+                ),
+            ],
+            outputs=[
+                MaskStrategyIO.Output(display_name="mask_strat"),
+                MaskParamsIO.Output(display_name="mask_params"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        mask_strat: MaskStrategy,
+        hard_mask_k: int,
+        w_max: float,
+        w_min: float,
+        decay_sigma: float,
+    ) -> dict:
+        mask_params = MaskParams(
+            hard_mask_k=hard_mask_k,
+            w_max=w_max,
+            w_min=w_min,
+            decay_sigma=decay_sigma,
+        )
+
+        return io.NodeOutput(mask_strat, mask_params)

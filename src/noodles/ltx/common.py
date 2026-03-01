@@ -1,14 +1,15 @@
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any
 
 import numpy as np
-import torch
-from comfy.sd import VAE
 from comfy_api.latest import io, ui
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from ulid import ULID
 
 from noodles.utils import parse_ulid
+
+# this will be generated once per extension load
+_DEF_ULID_STR = str(ULID())
 
 
 class BootstrapMode(StrEnum):
@@ -17,169 +18,30 @@ class BootstrapMode(StrEnum):
     VAERoundtrip = "vae_roundtrip"
     RawLatent = "raw_latent"
 
-    class Input(io.DynamicCombo.Input):
-        def __init__(
-            id: str,
-            display_name: str = "Bootstrap Mode",
-            optional: bool = False,
-            tooltip: str = "Strategy for generating the initial latent frame on segments after the first.",
-            lazy: bool = None,
-            extra_dict=None,
-        ):
-            super().__init__(
-                id,
-                display_name=display_name,
-                options=[
-                    io.DynamicCombo.Option(
-                        BootstrapMode.SegmentZero,
-                        [
-                            io.Vae.Input("vae", display_name="VAE"),
-                            io.Image.Input("init_image", display_name="Initial Image"),
-                        ],
-                    ),
-                    io.DynamicCombo.Option(
-                        BootstrapMode.DummyLatent,
-                        [
-                            io.Float.Input(
-                                "noise_sigma",
-                                display_name="Noise Sigma",
-                                default=0.5,
-                                min=0.0,
-                                max=1.0,
-                                step=0.01,
-                            )
-                        ],
-                    ),
-                    io.DynamicCombo.Option(
-                        BootstrapMode.VAERoundtrip,
-                        [io.Vae.Input("vae", display_name="VAE")],
-                    ),
-                    io.DynamicCombo.Option(
-                        BootstrapMode.RawLatent,
-                        [],
-                    ),
-                ],
-                optional=optional,
-                tooltip=tooltip,
-                lazy=lazy,
-                extra_dict=extra_dict,
-            )
-
-    def unpack_input(
-        self, values: dict
-    ) -> tuple["BootstrapMode", dict[str, torch.Tensor, VAE | float | None]]:
-        strat = values["strat_name"]
-        match strat:
-            case BootstrapMode.SegmentZero:
-                return BootstrapMode(strat), {"init_image": values["init_image"]}
-            case BootstrapMode.DummyLatent:
-                return BootstrapMode(strat), {"noise_sigma": values["noise_sigma"]}
-            case BootstrapMode.VAERoundtrip:
-                return BootstrapMode(strat), {"vae": values["vae"]}
-            case BootstrapMode.RawLatent:
-                return BootstrapMode(strat), {}
-            case _:
-                raise ValueError(f"Unknown bootstrap strategy: {strat}")
-
-    class Output(io.Combo.Output):
-        def __init__(
-            self,
-            id: str = None,
-            display_name: str = None,
-            tooltip: str = "Strategy for generating the initial latent frame on segments after the first.",
-            **kwargs,
-        ):
-            super().__init__(
-                id,
-                display_name=display_name,
-                options=BootstrapMode,
-                tooltip=tooltip,
-                **kwargs,
-            )
-
 
 class MaskParams(BaseModel):
-    hard_mask_k: int | None = Field(2, ge=0, le=256)
-    w_max: float | None = Field(1.0, ge=0.0, le=1.0)
-    w_min: float | None = Field(0.1, ge=0.0, le=1.0)
-    decay_sigma: float | None = Field(0.4, ge=0.0, le=1.0)
+    hard_mask_k: int = Field(2, ge=1, le=256)
+    w_max: float = Field(1.0, ge=0.0, le=1.0)
+    w_min: float = Field(0.1, ge=0.0, le=1.0)
+    decay_sigma: float = Field(0.4, ge=0.0, le=1.0)
 
-    HARD_MASK_K_IN: ClassVar[io.Int.Input] = io.Int.Input(
-        "hard_mask_k",
-        default=2,
-        min=0,
-        max=256,
-        tooltip="Number of overlapped latents to hard-mask at strength 1.0 before decay.",
-    )
-    W_MAX_IN: ClassVar[io.Float.Input] = io.Float.Input(
-        "w_max",
-        default=1.0,
-        min=0.0,
-        max=1.0,
-        step=0.01,
-        tooltip="Maximum strength for the final latent in the overlap window.",
-    )
-    W_MIN_IN: ClassVar[io.Float.Input] = io.Float.Input(
-        "w_min",
-        default=0.1,
-        min=0.0,
-        max=1.0,
-        step=0.01,
-        tooltip="Minimum strength for the final latent in the overlap window.",
-    )
-    SIGMA_IN: ClassVar[io.Float.Input] = io.Float.Input(
-        "decay_sigma",
-        default=0.4,
-        min=0.0,
-        max=1.0,
-        step=0.01,
-        tooltip="Sigma for half-Gaussian decay curve.",
+    model_config: ConfigDict = ConfigDict(
+        extra="ignore",
     )
 
-
-@io.comfytype(io_type="NOODLES_LTX_MASK_PARAMS")
-class MaskParamsIO(io.ComfyTypeIO):
-    Type = MaskParams
-
-    class Input(io.WidgetInput):
-        """Mask strategy parameters input."""
-
-        def __init__(
-            self,
-            id: str,
-            display_name: str = None,
-            optional: bool = False,
-            tooltip: str = None,
-            lazy: bool = None,
-            default: MaskParams | dict | str | None = None,
-            force_input: bool = None,
-            extra_dict: dict | None = None,
-            raw_link: bool = None,
-            advanced: bool = None,
-        ):
-            if isinstance(default, dict):
-                default = MaskParams.model_validate(default, strict=False)
-            if isinstance(default, str):
-                default = MaskParams.model_validate_json(default, strict=False)
-
-            super().__init__(
-                id,
-                display_name,
-                optional,
-                tooltip,
-                lazy,
-                default,
-                False,
-                None,
-                force_input,
-                extra_dict,
-                raw_link,
-                advanced,
-            )
-            self.default: MaskParams
-
-        def as_dict(self):
-            return super().as_dict()
+    @classmethod
+    def model_validate_any(
+        cls, value: Any, strict: bool = False, extra: bool = True, **kwargs
+    ) -> "MaskParams":
+        match value:
+            case cls():
+                return value
+            case str() if value.strip():
+                return cls.model_validate_json(value, strict=strict, extra=extra, **kwargs)
+            case dict():
+                return cls.model_validate(value, strict=strict, extra=extra, **kwargs)
+            case _:
+                raise TypeError(f"Unsupported segment metadata type: {type(value)!r}")
 
 
 class MaskStrategy(StrEnum):
@@ -189,82 +51,6 @@ class MaskStrategy(StrEnum):
     Smoothstep = "smoothstep"
     Smootherstep = "smootherstep"
     HalfGaussian = "half_gaussian"
-
-    class Input(io.DynamicCombo.Input):
-        def __init__(
-            self,
-            id="mask_strat",
-            display_name: str = "Mask Strategy",
-            optional: bool = False,
-            tooltip: str = None,
-            lazy: bool = None,
-            extra_dict: dict | None = None,
-        ):
-
-            super().__init__(
-                id,
-                display_name,
-                options=[
-                    io.DynamicCombo.Option(
-                        "Load Params",
-                        [
-                            io.Combo.Input("strat_name", options=MaskStrategy, display_name="Strategy Type"),
-                            MaskParamsIO.Input(
-                                "mask_params", display_name="Mask Params", tooltip="Mask parameters"
-                            ),
-                        ],
-                    ),
-                    io.DynamicCombo.Option(
-                        MaskStrategy.SolidMask,
-                        [MaskParams.HARD_MASK_K_IN, MaskParams.W_MAX_IN],
-                    ),
-                    io.DynamicCombo.Option(
-                        MaskStrategy.LinearDecay,
-                        [MaskParams.HARD_MASK_K_IN, MaskParams.W_MAX_IN, MaskParams.W_MIN_IN],
-                    ),
-                    io.DynamicCombo.Option(
-                        MaskStrategy.CosineDecayV1,
-                        [MaskParams.HARD_MASK_K_IN, MaskParams.W_MAX_IN, MaskParams.W_MIN_IN],
-                    ),
-                    io.DynamicCombo.Option(
-                        MaskStrategy.Smoothstep,
-                        [MaskParams.HARD_MASK_K_IN, MaskParams.W_MAX_IN, MaskParams.W_MIN_IN],
-                    ),
-                    io.DynamicCombo.Option(
-                        MaskStrategy.Smootherstep,
-                        [MaskParams.HARD_MASK_K_IN, MaskParams.W_MAX_IN, MaskParams.W_MIN_IN],
-                    ),
-                    io.DynamicCombo.Option(
-                        MaskStrategy.HalfGaussian,
-                        [
-                            MaskParams.HARD_MASK_K_IN,
-                            MaskParams.W_MAX_IN,
-                            MaskParams.W_MIN_IN,
-                            MaskParams.SIGMA_IN,
-                        ],
-                    ),
-                ],
-                optional=optional,
-                tooltip=tooltip,
-                lazy=lazy,
-                extra_dict=extra_dict,
-            )
-
-    class Output(io.DynamicCombo.Output):
-        def __init__(
-            self,
-            id="mask_strat",
-            display_name: str = "Mask Strategy",
-            tooltip: str = None,
-            extra_dict: dict | None = None,
-        ):
-            super().__init__(
-                id,
-                display_name,
-                options=MaskStrategy.Input.options,
-                tooltip=tooltip,
-                extra_dict=extra_dict,
-            )
 
 
 def get_mask_decay_curve(
@@ -319,8 +105,11 @@ def get_mask_decay_curve(
     return w.tolist()
 
 
+### Miscellaneous extra nodes that are not specific to a single operating mode
+
+
 @io.comfytype(io_type="ULID")
-class LTXULID(io.ComfyTypeIO):
+class ComfyULID(io.ComfyTypeIO):
     Type = ULID
 
     class Input(io.WidgetInput):
@@ -334,7 +123,7 @@ class LTXULID(io.ComfyTypeIO):
             tooltip: str = None,
             lazy: bool = None,
             default: str | ULID = None,
-            force_input: bool = None,
+            force_input: bool = True,
             extra_dict: dict | None = None,
             raw_link: bool = None,
             advanced: bool = None,
@@ -358,30 +147,31 @@ class LTXULID(io.ComfyTypeIO):
             )
             self.default: ULID
 
-        def as_dict(self):
-            return super().as_dict()
+    # TODO: Work out how to make this a single-line read-only textbox. May take some custom JS,
+    # since the single-row widget types are canvas-rendered rather than DOM elements.
+    class Output(io.Output):
+        pass
 
 
-class LTXULIDPreviewNood(io.ComfyNode):
+class ULIDPreviewNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="LTXULIDPreviewNood",
-            display_name="LTX ULID Preview",
-            category="noodles/ltx",
+            node_id="ULIDPreviewNood",
+            display_name="ULID Preview",
+            category="noodles/misc",
             inputs=[
                 io.MultiType.Input(
                     io.String.Input("ulid", display_name="ULID", force_input=True),
-                    types=[io.String, LTXULID, io.Int],
+                    types=[io.String, ComfyULID, io.Int],
                     optional=True,
                     tooltip="A ULID string or ULID object to preview.",
                 )
             ],
             outputs=[
-                LTXULID.Output(display_name="ULID"),
+                ComfyULID.Output(display_name="ULID"),
             ],
             is_output_node=True,
-            enable_expand=True,
         )
 
     @classmethod
@@ -399,23 +189,25 @@ class LTXULIDPreviewNood(io.ComfyNode):
         )
 
 
-class LTXULIDFromStrNood(io.ComfyNode):
+class ULIDFromStrNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
+
         return io.Schema(
-            node_id="LTXULIDFromStrNood",
-            display_name="LTX ULID From String",
-            category="noodles/ltx",
+            node_id="ULIDFromStrNood",
+            display_name="ULID From String",
+            category="noodles/misc",
             inputs=[
                 io.String.Input(
                     "ulid",
                     display_name="ULID",
                     optional=True,
-                    tooltip="Optional string to parse into a ULID. If empty or not provided, a new one will be generated.",
+                    default=_DEF_ULID_STR,
+                    tooltip="Optional string to parse into a ComfyULID. If empty or not provided, a new one will be generated.",
                 )
             ],
             outputs=[
-                LTXULID.Output(display_name="ULID"),
+                ComfyULID.Output(display_name="ULID"),
             ],
         )
 
