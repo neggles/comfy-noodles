@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from comfy.comfy_types import FileLocator
 from comfy.sd import VAE
-from comfy.utils import ProgressBar, load_torch_file, save_torch_file
+from comfy.utils import load_torch_file, save_torch_file
 from comfy_api.latest import LatentInput, io
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 from pydantic.types import AwareDatetime
@@ -24,21 +24,15 @@ from noodles.utils import (
 )
 
 from .common import (
+    SEGMENT_METADATA_KEY,
     BootstrapMode,
     ComfyULID,
     MaskParams,
     MaskStrategy,
     get_mask_decay_curve,
-    get_next_segment_iteration,
-    parse_segment_name,
 )
-from .io import (
-    BootstrapModeIO,
-    MaskParamsIO,
-    MaskStrategyIO,
-)
-
-SEGMENT_METADATA_KEY = "ltx_l2v_segment"
+from .io import BootstrapModeIO, MaskParamsIO, MaskStrategyIO
+from .paths import find_segment_file, get_next_segment_iteration
 
 
 class LTXLat2VidSegmentData(BaseModel):
@@ -163,39 +157,6 @@ def load_segment_file(
     return state_dict, segment_data, metadata_json, resolved_path
 
 
-def _find_segment_file(video_folder: str, segment_idx: int, iteration: int) -> Path:
-    output_root = get_output_dir_path()
-    folder_path = output_root / video_folder
-    if not folder_path.exists() or not folder_path.is_dir():
-        raise FileNotFoundError(f"Subfolder does not exist: {folder_path}")
-
-    candidates: list[tuple[int, Path]] = []
-    for path in folder_path.glob("*.safetensors"):
-        ids = parse_segment_name(path)
-        if not ids:
-            continue
-        seg_idx, seg_iter = ids
-        if seg_idx == segment_idx:
-            candidates.append((seg_iter, path))
-
-    if not candidates:
-        raise FileNotFoundError(f"No segment files found for segment_idx={segment_idx} in {folder_path}")
-
-    candidates.sort(key=lambda item: item[0])
-
-    if iteration <= 0:
-        return candidates[-1][1]
-
-    for seg_iter, path in candidates:
-        if seg_iter == iteration:
-            return path
-
-    available = ", ".join(str(seg_iter) for seg_iter, _ in candidates)
-    raise FileNotFoundError(
-        f"No segment file found for segment_idx={segment_idx}, iteration={iteration}. Available iterations: {available}"
-    )
-
-
 def _compute_overlap_strengths(
     total_k: int,
     bootstrap_mode: BootstrapMode,
@@ -256,9 +217,8 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                     "subfolder",
                     display_name="Folder Name",
                     multiline=False,
-                    default="ltx/{video_name}_{video_id}",
-                    tooltip="Folder prefix for the saved segment data. Can include placeholders for video_name, "
-                    + " and video_id. Segment index, segment ID, and iteration will be appended automatically.",
+                    default="ltx/",
+                    tooltip="Folder prefix for the saved segment data. A subdirectory will be created for each video with the format {video_name}_{video_id}. Segments will be stored as safetensors files within the video directory.",
                 ),
                 io.Latent.Input("latent", tooltip="The latents for this segment"),
                 ComfyULID.Input(
@@ -322,17 +282,20 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                 MaskParamsIO.Input("mask_params"),
             ],
             outputs=[
-                ComfyULID.Output(display_name="video_id"),
-                ComfyULID.Output(display_name="segment_id"),
-                io.String.Output(display_name="segment_path"),
-                io.String.Output(display_name="metadata_json"),
+                ComfyULID.Output(display_name="video_id", tooltip="ULID for the video that this segment belongs to."),
+                ComfyULID.Output(display_name="segment_id", tooltip="This segment's ULID, unique per iteration"),
+                io.String.Output(
+                    display_name="segment_path",
+                    tooltip="Full path to the saved segment file, including filename. Useful for debugging and chaining nodes that need to read the file.",
+                ),
+                io.String.Output(display_name="metadata_json", tooltip="Full segment metadata as JSON string for debugging purposes."),
                 io.String.Output(
                     display_name="video_prefix",
                     tooltip="File prefix for the saved segment. Feed to video save node if saving decoded video.",
                 ),
                 io.String.Output(
                     display_name="frames_prefix",
-                    tooltip="Folder prefix for the saved segment. Feed to video save node if saving frames.",
+                    tooltip="Prefix to use if saving frames for this segment. Feed to frame save node if saving frames.",
                 ),
                 io.Image.Output(
                     display_name="frames",
@@ -371,27 +334,25 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         parent_ulid = parse_ulid(parent_id, "parent_id", optional=True)
         segment_id = ULID()
 
-        try:
-            subfolder = subfolder.format(
-                video_name=video_name,
-                video_id=str(video_ulid),
-                segment_idx=segment_idx,
-                segment_id=str(segment_id),
-            )
-        except KeyError as exc:
-            raise ValueError(f"Unknown placeholder in subfolder template: {exc}") from exc
+        # build the output dir path with video name and ID
+        subfolder = Path(subfolder).joinpath(f"{video_name}_{video_ulid}").as_posix().strip("/")
+        output_dir = get_output_dir_path() / subfolder
 
         filename_prefix = f"{video_name}.v{str(video_ulid)[:10]}.s{segment_idx:03d}"
-        output_root = get_output_dir_path()
-        counter = get_next_segment_iteration(output_root / subfolder / f"{filename_prefix}.safetensors")
+        # Get the next iteration number for this segment index to avoid overwriting existing files.
+        counter = get_next_segment_iteration(output_dir / f"{filename_prefix}.safetensors")
+        # build the actual segment filename with the iteration and segment ID suffix (used to make parent-chasing simpler)
+        filename = f"{filename_prefix}_i{counter:03d}.{str(segment_id)[-6:]}.safetensors"
 
-        filename = f"{filename_prefix}_i{counter:03d}.safetensors"
-        output_dir = output_root / subfolder
-        output_path = output_dir / filename
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # build full segment path and ensure parent directories exist
+        segment_path = output_dir / filename
+        segment_path.parent.mkdir(parents=True, exist_ok=True)
 
-        frames_prefix = f"{subfolder}/{output_path.stem}/frame_"
-        video_prefix = f"{subfolder}/{output_path.stem}/video_"
+        # tail end of the aux file (frames/video) output prefixes
+        aux_file_suffix = f"s{segment_idx:03d}_i{counter:03d}.{str(segment_id)[-4:]}"
+
+        frames_prefix = f"{subfolder}/{segment_path.stem}/frames.{aux_file_suffix}/frame"
+        video_prefix = f"{subfolder}/{segment_path.stem}/video.{aux_file_suffix}"
 
         samples: torch.Tensor = latent["samples"]
         if samples.ndim != 5:
@@ -443,7 +404,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             extra_pnginfo=extra_pnginfo,
         )
 
-        compressed_frames = compress_image_tensor_webp(save_images)
+        compressed_frames = compress_image_tensor_webp(save_images, report_progress=True)
         compressed_bootstrap = compress_image_tensor_webp(bootstrap_frame)
 
         output = {
@@ -455,7 +416,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         }
         save_torch_file(
             output,
-            output_path,
+            segment_path,
             metadata={
                 SEGMENT_METADATA_KEY: metadata.model_dump_json(exclude={"prompt", "extra_pnginfo"}),
                 "prompt": json.dumps(prompt_info),
@@ -468,7 +429,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         return io.NodeOutput(
             str(video_ulid),
             str(segment_id),
-            str(output_path),
+            str(segment_path),
             metadata.model_dump_json(),
             video_prefix,
             frames_prefix,
@@ -511,13 +472,13 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
         )
 
     @classmethod
-    def execute(
+    async def execute(
         cls,
         video_folder: str,
         segment_idx: int,
         iteration: int,
     ) -> io.NodeOutput:
-        segment_path = _find_segment_file(video_folder, segment_idx, iteration)
+        segment_path = find_segment_file(video_folder, segment_idx, iteration)
         state_dict, segment_data, _, _ = load_segment_file(segment_path)
 
         if "latent" not in state_dict:
@@ -529,9 +490,11 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
         if "frames" in state_dict:
             frames = state_dict["frames"].cpu().contiguous()
         elif "compressed_frames" in state_dict:
-            frames = state_dict["compressed_frames"].cpu().contiguous()
-            pbar = ProgressBar(total=frames.shape[0])
-            frames = decompress_image_tensor_webp(frames, (segment_data.width_px, segment_data.height_px), as_float=True, pbar=pbar)
+            frames = decompress_image_tensor_webp(
+                state_dict["compressed_frames"].cpu().contiguous(),
+                (segment_data.width_px, segment_data.height_px),
+                as_float=True,
+            )
 
         latent: dict[str, torch.Tensor] = {"samples": samples}
 

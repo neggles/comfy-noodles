@@ -1,5 +1,7 @@
 from comfy_api.latest import ComfyExtension, io
 
+# need to import to register routes, even if not used directly
+from . import routes  # noqa: F401
 from .ltx.common import (
     ULIDFromStrNood,
     ULIDPreviewNood,
@@ -13,9 +15,13 @@ from .ltx.l2v import (
     LTXLat2VidSegmentSaveNood,
     LTXMaskParamsNood,
 )
-from .misc import StringIntAddNood
+from .misc import (
+    AudioPreviewMelSpectrogramNood,
+    StringIntAddNood,
+)
 
 _NODE_LIST = [
+    AudioPreviewMelSpectrogramNood,
     LTXImg2VidInplaceNood,
     LTXLat2VidGetNextSegmentDataNood,
     LTXLat2VidGetNextSegmentSaveDataNood,

@@ -6,10 +6,12 @@ from typing import Any
 
 import numpy as np
 import torch
-from comfy.utils import ProgressBar
+from comfy_api.latest import ComfyAPISync
 from folder_paths import get_input_directory, get_output_directory
 from PIL import Image
 from ulid import ULID
+
+api = ComfyAPISync()
 
 
 def get_input_dir_path() -> Path:
@@ -92,16 +94,17 @@ def ndimage_to_webp(arr: np.ndarray, quality: int = 80, method: int = 3) -> Byte
     return buf.getbuffer()
 
 
+@torch.inference_mode()
 def compress_image_tensor_webp(
     images: torch.Tensor,  # [N, H, W, C]
-    padded: bool = True,
-    pbar: ProgressBar | None = None,
+    return_padded: bool = True,
+    report_progress: bool = False,
 ) -> torch.Tensor:
     if images.ndim == 3:
         images = images.unsqueeze(0)  # add batch dimension for easier processing
 
     if images.dtype == torch.float32 and images.max() <= 1.0:
-        images = images.mul(255.0).clamp_(0, 255)
+        images = images.detach().clone().mul(255.0).clamp(0, 255)
     elif images.dtype != torch.uint8:
         raise ValueError(f"Unsupported image tensor dtype: {images.dtype}")
 
@@ -111,34 +114,36 @@ def compress_image_tensor_webp(
     for img in ndimages:
         webp_buf = ndimage_to_webp(img, quality=0, method=0)
         webp_tensors.append(torch.frombuffer(webp_buf, dtype=torch.uint8))
-        if pbar:
-            pbar.update(1)
+        if report_progress:
+            api.execution.set_progress(value=len(webp_tensors), max_value=len(ndimages))
 
-    ragged = torch.nested.nested_tensor(webp_tensors, dtype=torch.uint8, layout=torch.jagged)
+    compressed_tensor = torch.nested.nested_tensor(webp_tensors, dtype=torch.uint8, layout=torch.jagged)
+    if return_padded:
+        compressed_tensor = compressed_tensor.to_padded_tensor(0)
+    return compressed_tensor.contiguous().to(images.device)
 
-    return ragged.to_padded_tensor(0).contiguous() if padded else ragged
 
-
+@torch.inference_mode()
 def decompress_image_tensor_webp(
     images: torch.Tensor,
     size: tuple[int, int],  # (W, H as PIL)
     as_float: bool = False,
-    pbar: ProgressBar | None = None,
+    report_progress: bool = False,
 ) -> torch.Tensor:
     # decompress a zero-padded [N, max_len] uint8 tensor of WebP bytes back into a [N, H, W, C] image tensor
     if images.ndim != 2 or images.dtype != torch.uint8:
         raise ValueError("Expected a 2D uint8 tensor of WebP bytes")
 
-    image_tensor = torch.empty((images.size(0), *size[::-1], 3), dtype=torch.uint8)  # (N, H, W, C)
-
+    n_images = images.shape[0]
+    image_tensor = torch.empty((n_images, *size[::-1], 3), dtype=torch.uint8)  # (N, H, W, C)
     with warnings.catch_warnings(action="ignore", category=UserWarning):
         for idx, img in enumerate(images):
             with BytesIO(img.cpu().numpy().tobytes()) as buf:
                 with Image.open(buf) as img:
                     image_tensor[idx] = torch.from_numpy(np.asarray(img, dtype=np.uint8))
-            if pbar:
-                pbar.update(1)
+            if report_progress:
+                api.execution.set_progress(value=idx + 1, max_value=n_images)
     if as_float:
         image_tensor = image_tensor.to(torch.float32).div_(255.0)
 
-    return image_tensor.contiguous().clone()
+    return image_tensor.contiguous().clone().to(images.device)

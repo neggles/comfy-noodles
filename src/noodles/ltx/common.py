@@ -1,7 +1,4 @@
-import re
 from enum import StrEnum
-from os import PathLike
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -11,33 +8,9 @@ from ulid import ULID
 
 from noodles.utils import parse_ulid
 
-SEGMENT_FILENAME_RE = re.compile(r"\.s(?P<segment>\d+)_i(?P<iteration>\d+)$")
-
+SEGMENT_METADATA_KEY = "ltx_l2v_segment"
 # this will be generated once per extension load
 _DEF_ULID_STR = str(ULID())
-
-
-def parse_segment_name(path: Path) -> tuple[int, int] | None:
-    match = SEGMENT_FILENAME_RE.search(path.stem)
-    if not match:
-        return None, None
-    return int(match.group("segment")), int(match.group("iteration"))
-
-
-def get_next_segment_iteration(filepath: PathLike) -> int:
-    filepath = Path(filepath)
-    folder = filepath.parent
-    if not folder.exists():
-        return 0
-
-    max_iter = 0
-    for f in folder.iterdir():
-        if f.is_file() and f.stem.startswith(filepath.stem):
-            _, s_iter = parse_segment_name(f)
-            if s_iter:
-                max_iter = max(max_iter, s_iter)
-
-    return max_iter + 1
 
 
 class BootstrapMode(StrEnum):
