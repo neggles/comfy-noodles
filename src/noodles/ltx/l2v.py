@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
-from comfy.comfy_types import FileLocator
 from comfy.sd import VAE
 from comfy.utils import load_torch_file, save_torch_file
 from comfy_api.latest import LatentInput, io
@@ -424,8 +423,6 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             },
         )
 
-        results: list[FileLocator] = [{"filename": filename, "subfolder": subfolder, "type": "output"}]
-
         return io.NodeOutput(
             str(video_ulid),
             str(segment_id),
@@ -434,7 +431,6 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             video_prefix,
             frames_prefix,
             save_images,
-            ui={"latents": results},
         )
 
 
