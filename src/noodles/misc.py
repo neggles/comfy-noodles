@@ -45,6 +45,44 @@ class StringIntAddNood(io.ComfyNode):
         return io.NodeOutput(result=int_a + in_b)  # ty:ignore[unknown-argument]
 
 
+class LTXImg2VidParamsNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="noodles-LTXImg2VidParamsNood",
+            display_name="LTX Img2Vid Params",
+            category="noodles/ltx",
+            inputs=[
+                io.Int.Input("n_frames", display_name="Length (Frames)", default=121, min=1, step=8),
+                io.Float.Input("fps", display_name="Framerate", default=30.0, min=1, max=240),
+                io.Boolean.Input(
+                    "save_images",
+                    display_name="Save Images",
+                    default=False,
+                    label_on="Yes",
+                    label_off="No",
+                ),
+                io.Int.Input("width", display_name="Width (px)", default=1600, min=320, max=4096, step=32),
+                io.Int.Input("height", display_name="Height (px)", default=900, min=320, max=4096, step=32),
+            ],
+            outputs=[
+                io.Int.Output(display_name="n_frames"),
+                io.Float.Output(display_name="fps"),
+                io.Boolean.Output(display_name="Save Images"),
+                io.Int.Output(display_name="Width"),
+                io.Int.Output(display_name="Height"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, *, num_frames: int, framerate: float, save_images: bool):
+        return io.NodeOutput(
+            num_frames,
+            framerate,
+            save_images,
+        )
+
+
 # WIP, not loaded yet
 class LoadVideoForAudioNood(io.ComfyNode):
     @classmethod
@@ -129,14 +167,6 @@ def plot_spectrogram(specgram: torch.Tensor, title: str = None, ylabel: str = "f
     ax.set_ylabel(ylabel)
     power_to_db = AT.AmplitudeToDB("power", 80.0)
     ax.imshow(power_to_db(specgram), origin="lower", aspect="auto", interpolation="nearest")
-
-
-def plot_fbank(fbank: torch.Tensor, title: str = None):
-    fig, axs = plt.subplots(1, 1)
-    axs.set_title(title or "Filter bank")
-    axs.imshow(fbank, aspect="auto")
-    axs.set_ylabel("frequency bin")
-    axs.set_xlabel("mel bin")
 
 
 class AudioPreviewMelSpectrogramNood(io.ComfyNode):

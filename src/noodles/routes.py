@@ -24,7 +24,7 @@ async def list_videos(request: web.Request) -> web.Response:
     return web.json_response(videos)
 
 
-@routes.get(API_BASE + "/ltx/videos/{video_id:v?\w{26}}")
+@routes.get(API_BASE + r"/ltx/videos/{video_id:v?\w{26}}")
 async def get_video_by_id(request: web.Request) -> web.Response:
     video_id = request.match_info["video_id"]
     try:
@@ -57,7 +57,7 @@ async def get_video_by_id(request: web.Request) -> web.Response:
     )
 
 
-@routes.get(API_BASE + "/ltx/videos/{video_id:v?\w{26}}/segments")
+@routes.get(API_BASE + r"/ltx/videos/{video_id:v?\w{26}}/segments")
 async def list_video_segments(request: web.Request) -> web.Response:
     video_id = request.match_info["video_id"]
     try:

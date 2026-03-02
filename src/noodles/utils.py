@@ -103,12 +103,13 @@ def compress_image_tensor_webp(
     if images.ndim == 3:
         images = images.unsqueeze(0)  # add batch dimension for easier processing
 
-    if images.dtype == torch.float32 and images.max() <= 1.0:
-        images = images.detach().clone().mul(255.0).clamp(0, 255)
+    if images.dtype == torch.float32 and (images.min() <= 0.0 or images.max() >= 1.0):
+        images = images.mul(255.0).clamp_(0, 255)
     elif images.dtype != torch.uint8:
         raise ValueError(f"Unsupported image tensor dtype: {images.dtype}")
 
-    ndimages: np.ndarray = images.cpu().numpy().astype(np.uint8)
+    # force is equivalent to .detach().cpu().resolve_conj().resolve_neg().numpy()
+    ndimages: np.ndarray = images.numpy(force=True).astype(np.uint8)  # (N, H, W, C)
 
     webp_tensors = []
     for img in ndimages:
@@ -138,7 +139,7 @@ def decompress_image_tensor_webp(
     image_tensor = torch.empty((n_images, *size[::-1], 3), dtype=torch.uint8)  # (N, H, W, C)
     with warnings.catch_warnings(action="ignore", category=UserWarning):
         for idx, img in enumerate(images):
-            with BytesIO(img.cpu().numpy().tobytes()) as buf:
+            with BytesIO(img.numpy(force=True).tobytes()) as buf:
                 with Image.open(buf) as img:
                     image_tensor[idx] = torch.from_numpy(np.asarray(img, dtype=np.uint8))
             if report_progress:

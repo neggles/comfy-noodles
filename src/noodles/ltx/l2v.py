@@ -333,8 +333,9 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         parent_ulid = parse_ulid(parent_id, "parent_id", optional=True)
         segment_id = ULID()
 
-        # build the output dir path with video name and ID
-        subfolder = Path(subfolder).joinpath(f"{video_name}_{video_ulid}").as_posix().strip("/")
+        # build the output dir path with video name and ID\
+        if str(video_ulid) not in subfolder or segment_idx == 0:
+            subfolder = Path(subfolder).joinpath(f"{video_name}_{video_ulid}").as_posix().strip("/")
         output_dir = get_output_dir_path() / subfolder
 
         filename_prefix = f"{video_name}.v{str(video_ulid)[:10]}.s{segment_idx:03d}"

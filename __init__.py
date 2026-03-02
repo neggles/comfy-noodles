@@ -1,9 +1,9 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from noodles import NoodlesExtension, comfy_entrypoint
+    from noodles.comfy import comfy_entrypoint
 else:
-    from .src.noodles import NoodlesExtension, comfy_entrypoint
+    from .src.noodles.comfy import comfy_entrypoint
 
 __author__ = """Andi Powers-Holmes"""
 __email__ = "aholmes@omnom.net"
