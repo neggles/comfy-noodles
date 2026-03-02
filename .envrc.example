@@ -1,0 +1,40 @@
+# direnv versions before 2.32.1 don't respect VIRTUAL_ENV for `layout python`, so we require at least that version
+if ! direnv_version v2.32.1 >/dev/null; then
+	echo "direnv v2.32.1 or higher is required. Please update direnv to use this project."
+	exit 1
+fi
+
+# path to comfyui repo root, defaults to two levels up from this file if COMFY_ROOT is not set
+COMFY_ROOT=${COMFY_ROOT:-"$(expand_path ../..)"}
+# path to comfyui venv, defaults to <comfy-root>/venv if COMFY_VENV is not set
+COMFY_VENV=${COMFY_VENV:-"$COMFY_ROOT/venv"}
+
+# find the comfy venv, error if it doesn't exist
+if [[ ! -d "$COMFY_VENV" ]]; then
+	echo "ComfyUI venv not found at default path '$COMFY_VENV', please set the COMFY_VENV environment variable to point to your comfyui venv."
+	exit 1
+fi
+export VIRTUAL_ENV=$(expand_path "$COMFY_VENV")
+layout python "${VIRTUAL_ENV}/bin/python"
+
+# make sure comfy repo and custom_nodes dirs are in PYTHONPATH (regrettably necessary)
+path_add PYTHONPATH "${COMFY_ROOT}/custom_nodes"
+path_add PYTHONPATH "${COMFY_ROOT}"
+
+# make uv use the comfyui venv
+export UV_PROJECT_ENVIRONMENT=${VIRTUAL_ENV}
+# tell uv to not manage packages so it doesn't trash the comfyui venv
+export UV_NO_SYNC=1
+# disable build isolation because pytorch be like that
+export UV_NO_BUILD_ISOLATION=1
+
+# if neither UV_CACHE_DIR nor UV_LINK_MODE are set, try to be a little clever (this is optional)
+if [[ -z "${UV_CACHE_DIR}" && -z "${UV_LINK_MODE}" ]]; then
+	# check if the venv and home directories are on the same filesystem
+	home_fs=$(df --output=source,fstype,size,target "${HOME}" | tail -1)
+	venv_fs=$(df --output=source,fstype,size,target "${VIRTUAL_ENV}" | tail -1)
+	# if they are on different filesystems, set UV_LINK_MODE to copy to avoid the link failure warning
+	if [[ "${home_fs}" != "${venv_fs}" ]]; then
+		export UV_LINK_MODE=copy
+	fi
+fi

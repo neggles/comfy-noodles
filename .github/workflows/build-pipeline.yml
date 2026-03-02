@@ -1,37 +1,80 @@
-name: CI build
+name: CI build and test
+run-name: CI build and test via ${{ github.event_name }} on ${{ github.ref }}
 
 on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-docs
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONIOENCODING: "utf8"
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    env:
-      PYTHONIOENCODING: "utf8"
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.12"]
-
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+        python-version:
+          - 3.12
+          - 3.13
+        experimental: [false]
+        include:
+          - os: ubuntu-latest
+            experimental: true # 26.04 isn't out yet so we allow this to fail for now
+          - python-version: 3.14
+            experimental: true # python 3.14 broke a lot of stuff so we allow it to fail for now
+    continue-on-error: ${{ matrix.experimental }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository at ${{ github.ref }}
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
 
-      - name: Set up Python
+      - name: Configure Git Credentials
+        id: git-config
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Set up Python ${{ matrix.python-version }}
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Set up `uv`
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Print `uv` cache key
+        run: "echo 'uv cache key: ${{ steps.setup-uv.outputs.cache-key }}'"
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install .[dev]
+        id: install-deps
+        run: uv pip install --group dev -e '.[ci]'
 
-      - name: Run Linting
-        run: |
-          ruff check .
-
-      - name: Run Tests
-        run: |
-          pytest tests/
+      - name: Run tests
+        id: tests
+        run: uv run pytest -v tests/

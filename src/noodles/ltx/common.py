@@ -58,9 +58,7 @@ class MaskParams(BaseModel):
     )
 
     @classmethod
-    def model_validate_any(
-        cls, value: Any, strict: bool = False, extra: bool = True, **kwargs
-    ) -> "MaskParams":
+    def model_validate_any(cls, value: Any, strict: bool = False, extra: bool = True, **kwargs) -> "MaskParams":
         match value:
             case cls():
                 return value
@@ -220,7 +218,6 @@ class ULIDPreviewNood(io.ComfyNode):
 class ULIDFromStrNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-
         return io.Schema(
             node_id="ULIDFromStrNood",
             display_name="ULID From String",

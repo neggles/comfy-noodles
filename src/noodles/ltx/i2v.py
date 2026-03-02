@@ -63,7 +63,6 @@ class LTXImg2VidInplaceNood(io.ComfyNode):
         mask_strat: MaskStrategy,
         decay_start: int,
     ) -> io.NodeOutput:
-
         samples = latent["samples"]
         time_scale_factor, height_scale_factor, width_scale_factor = vae.downscale_index_formula
 

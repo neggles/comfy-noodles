@@ -1,4 +1,4 @@
-from comfy_api.latest import io, ui
+from comfy_api.latest import io
 
 from .common import BootstrapMode, MaskParams, MaskStrategy
 

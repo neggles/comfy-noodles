@@ -1,5 +1,5 @@
 [project]
-name = "noodles"
+name = "comfy-noodles"
 version = "0.1.0"
 description = "neggles custom comfy nodes."
 readme = "README.md"
@@ -14,7 +14,6 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "kornia>=0.8.1",
     "numpy>=2.2.6",
     "pydantic>=2.12.5",
     "python-ulid>=3.1.0",
@@ -25,10 +24,15 @@ Repository = "https://github.com/neggles/comfy-noodles"
 BugTracker = "https://github.com/neggles/comfy-noodles/issues"
 Documentation = "https://github.com/neggles/comfy-noodles/wiki"
 
-[build-system]
-requires = ["uv_build>=0.10.4,<0.11.0"]
-build-backend = "uv_build"
+[project.optional-dependencies]
+docs = [
+    "mkdocs-material>=9.7.3",
+]
+ci = [
+    "comfy-noodles[docs]", # include docs dependencies in ci group so that docs build will work in CI
+]
 
+# duplication so that uv sync and uv pip install will both work. sigh
 [dependency-groups]
 dev = [
     "bump-my-version>=1.2.7",
@@ -37,6 +41,21 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.15.2",
 ]
+docs = [
+    "mkdocs-material>=9.7.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"
+
+
+[tool.uv]
+required-version = ">=0.10.4" # the uv github action will respect this
+torch-backend = "auto"        # only affects `uv pip` commands
+
+[tool.uv.build-backend]
+module-name = "noodles"
 
 
 [tool.ruff]
@@ -91,7 +110,8 @@ testpaths = [
 
 [tool.comfy]
 PublisherId = "neggles"
-DisplayName = "noodles (cursed)"
+DisplayName = "noodles (by neggles)"
 Icon = "https://github.com/neggles/comfy-noodles/raw/refs/heads/main/assets/noodles.png"
 Tags = []
 requires-comfyui = ">=0.15.0"
+includes = ["web/"]

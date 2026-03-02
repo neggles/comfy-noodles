@@ -1,5 +1,4 @@
 import json
-import re
 from datetime import UTC, datetime
 from hashlib import sha256
 from os import PathLike
@@ -10,8 +9,7 @@ import torch
 from comfy.comfy_types import FileLocator
 from comfy.sd import VAE
 from comfy.utils import ProgressBar, load_torch_file, save_torch_file
-from comfy_api.latest import LatentInput, io, ui
-from comfy_extras.nodes_lt import get_noise_mask
+from comfy_api.latest import LatentInput, io
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 from pydantic.types import AwareDatetime
 from ulid import ULID
@@ -108,9 +106,7 @@ class LTXLat2VidSegmentData(BaseModel):
     )
 
     @classmethod
-    def model_validate_any(
-        cls, value: Any, strict: bool = False, extra: bool = True, **kwargs
-    ) -> "LTXLat2VidSegmentData":
+    def model_validate_any(cls, value: Any, strict: bool = False, extra: bool = True, **kwargs) -> "LTXLat2VidSegmentData":
         match value:
             case cls():
                 return value
@@ -237,10 +233,7 @@ def _deterministic_seed(
     seed: int,
     overlap_count: int,
 ) -> int:
-    seed_key = (
-        f"{prev_segment_data.video_id}|{prev_segment_data.segment_id}|"
-        f"{prev_segment_data.segment_idx}|{seed}|{overlap_count}"
-    )
+    seed_key = f"{prev_segment_data.video_id}|{prev_segment_data.segment_id}|{prev_segment_data.segment_idx}|{seed}|{overlap_count}"
     digest = sha256(seed_key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
@@ -248,7 +241,6 @@ def _deterministic_seed(
 class LTXLat2VidSegmentSaveNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-
         return io.Schema(
             node_id="LTXLat2VidSegmentSaveNood",
             display_name="LTX Lat2Vid Segment Save",
@@ -539,9 +531,7 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
         elif "compressed_frames" in state_dict:
             frames = state_dict["compressed_frames"].cpu().contiguous()
             pbar = ProgressBar(total=frames.shape[0])
-            frames = decompress_image_tensor_webp(
-                frames, (segment_data.width_px, segment_data.height_px), as_float=True, pbar=pbar
-            )
+            frames = decompress_image_tensor_webp(frames, (segment_data.width_px, segment_data.height_px), as_float=True, pbar=pbar)
 
         latent: dict[str, torch.Tensor] = {"samples": samples}
 
@@ -641,18 +631,14 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
             raise ValueError(f"next_latent has {next_samples.shape[2]} latents but overlap_k is {overlap_k}")
 
         if prev_samples.shape[2] < overlap_k:
-            raise ValueError(
-                f"prev_latent has {prev_samples.shape[2]} usable latents but overlap_k is {overlap_k}"
-            )
+            raise ValueError(f"prev_latent has {prev_samples.shape[2]} usable latents but overlap_k is {overlap_k}")
 
         overlap_chunk = prev_samples[:, :, -overlap_k:, :, :].clone()
         source_latent = overlap_chunk[:, :, 0:1, :, :]
         carried_latents = overlap_chunk[:, :, 1:, :, :]
 
         if bootstrap_mode == BootstrapMode.SegmentZero:
-            raise ValueError(
-                "BootstrapMode.SegmentZero is only valid for the first segment and cannot be used for continuation"
-            )
+            raise ValueError("BootstrapMode.SegmentZero is only valid for the first segment and cannot be used for continuation")
 
         new_seed = _deterministic_seed(prev_segment_data, seed=noise_seed, overlap_count=overlap_k)
 
@@ -701,9 +687,7 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
         noise_mask[:, :, :overlap_k, :, :] = 1.0 - strengths_tensor.view(1, 1, overlap_k, 1, 1)
 
         next_segment_idx = int(prev_segment_data.segment_idx) + 1
-        next_start_frame = (
-            int(prev_segment_data.start_frame) + int(prev_segment_data.n_frames) - (8 * (overlap_k - 1))
-        )
+        next_start_frame = int(prev_segment_data.start_frame) + int(prev_segment_data.n_frames) - (8 * (overlap_k - 1))
 
         next_metadata = prev_segment_data.model_copy(
             update={
@@ -738,9 +722,7 @@ class LTXLat2VidGetNextSegmentSaveDataNood(io.ComfyNode):
             display_name="LTX Lat2Vid Next Segment Data",
             category="noodles/ltx",
             inputs=[
-                LTXLat2VidSegmentIO.Input(
-                    id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"
-                ),
+                LTXLat2VidSegmentIO.Input(id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"),
             ],
             outputs=[
                 MaskParamsIO.Output(display_name="mask_params"),
@@ -783,9 +765,7 @@ class LTXLat2VidGetNextSegmentDataNood(io.ComfyNode):
             display_name="LTX Lat2Vid Next Segment Save Data",
             category="noodles/ltx",
             inputs=[
-                LTXLat2VidSegmentIO.Input(
-                    id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"
-                ),
+                LTXLat2VidSegmentIO.Input(id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"),
             ],
             outputs=[
                 MaskParamsIO.Output(display_name="mask_params"),

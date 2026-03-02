@@ -1,5 +1,4 @@
 import json
-
 import warnings
 from io import BytesIO
 from pathlib import Path
@@ -71,9 +70,7 @@ def parse_ulid(
             try:
                 return ULID.parse(value)
             except Exception as e:
-                raise ValueError(
-                    f"Could not parse value '{value!r}' of type '{type(value)}' for {field_name}"
-                ) from e
+                raise ValueError(f"Could not parse value '{value!r}' of type '{type(value)}' for {field_name}") from e
 
 
 def parse_json_dict(value: Any) -> dict[str, Any]:
