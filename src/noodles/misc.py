@@ -255,9 +255,12 @@ class AudioPreviewMelSpectrogramNood(io.ComfyNode):
         prev_backend = plt.get_backend()
         plt.switch_backend("Agg")
 
-        fig, axs = plt.subplots(2, 1)
-        dpi: float = fig.get_dpi()
-        fig.set_size_inches(width_px / dpi, height_px / dpi)
+        fig, axs = plt.subplots(
+            2,
+            1,
+            figsize=(width_px / 96, height_px / 96),
+            dpi=96,
+        )
 
         plot_waveform(waveform, sr, title="Audio waveform", ax=axs[0])
         plot_spectrogram(melspec[0], title="Mel Spectrogram", ax=axs[1], ylabel="mel freq")

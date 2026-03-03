@@ -1,17 +1,74 @@
+import inspect
 import json
 import warnings
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeVar
 
 import numpy as np
 import torch
-from comfy_api.latest import ComfyAPISync
 from folder_paths import get_input_directory, get_output_directory
 from PIL import Image
+from pydantic import BaseModel
 from ulid import ULID
 
-api = ComfyAPISync()
+try:
+    from comfy_api.latest import ComfyAPISync
+
+    api = ComfyAPISync()
+except (ImportError, ModuleNotFoundError):
+    # comfy API is optional for these functions, so we can just use a dummy object to avoid NameErrors
+    class DummyAPI:
+        def __init__(self, *args, **kwargs):
+            self.execution = self
+
+        def set_progress(self, *args, **kwargs):
+            pass
+
+    api = DummyAPI()
+
+# for the mixin
+T = TypeVar("T", bound=BaseModel)
+
+
+class ValidateAnyMixin:
+    @classmethod
+    def model_validate_any(
+        cls: type[T],
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: bool | Literal["allow", "ignore", "forbid"] | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> T:
+        match obj:
+            case cls():
+                return obj
+            case str() | bytes() | bytearray():
+                return cls.model_validate_json(
+                    json_data=obj,
+                    strict=strict,
+                    extra=extra,
+                    context=context,
+                    by_alias=by_alias,
+                    by_name=by_name,
+                )
+            case dict() | BaseModel():
+                # filter kwargs
+                return cls.model_validate(
+                    obj=obj,
+                    strict=strict,
+                    extra=extra,
+                    from_attributes=from_attributes,
+                    context=context,
+                    by_alias=by_alias,
+                    by_name=by_name,
+                )
+            case _:
+                raise TypeError(f"Unsupported segment metadata type: {type(obj)!r}")
 
 
 def get_input_dir_path() -> Path:
@@ -20,6 +77,20 @@ def get_input_dir_path() -> Path:
 
 def get_output_dir_path() -> Path:
     return Path(get_output_directory())
+
+
+def get_caller_var_name(var: Any) -> str | None:
+    """Get the name of an argument passed to a function from the caller's scope.
+
+    This actually searches two stack frames up, since we want the name from the caller of this function's caller.
+    """
+
+    caller_frame = inspect.stack()[2]
+    caller_locals = caller_frame.frame.f_locals
+    for var_name, var_value in caller_locals.items():
+        if var_value is var:
+            return var_name
+    return None
 
 
 def get_folders_in_outdir(depth: int = 2) -> list[str]:
@@ -87,11 +158,21 @@ def parse_json_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
-def ndimage_to_webp(arr: np.ndarray, quality: int = 80, method: int = 3) -> BytesIO:
+# requires `pillow-jpegxl-plugin` and a compatible Pillow version (10.4.0+)
+def ndimage_to_jxl_lossless(arr: np.ndarray, decoding_speed: int = 0) -> BytesIO:
     pil_image = Image.fromarray(arr)
     buf = BytesIO()
-    pil_image.save(buf, format="WebP", lossless=True, quality=quality, method=method)
+    pil_image.save(buf, format="JXL", lossless=True, decoding_speed=decoding_speed)
     return buf.getbuffer()
+
+
+class LazyComfyAPISync(ComfyAPISync):
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
 
 @torch.inference_mode()
@@ -113,8 +194,10 @@ def compress_image_tensor_webp(
 
     webp_tensors = []
     for img in ndimages:
-        webp_buf = ndimage_to_webp(img, quality=0, method=0)
-        webp_tensors.append(torch.frombuffer(webp_buf, dtype=torch.uint8))
+        pil_image = Image.fromarray(img)
+        webp_buf = BytesIO()
+        pil_image.save(webp_buf, format="WebP", lossless=True, quality=0, method=0)
+        webp_tensors.append(torch.frombuffer(webp_buf.getbuffer(), dtype=torch.uint8))
         if report_progress:
             api.execution.set_progress(value=len(webp_tensors), max_value=len(ndimages))
 
@@ -141,7 +224,7 @@ def decompress_image_tensor_webp(
         for idx, img in enumerate(images):
             with BytesIO(img.numpy(force=True).tobytes()) as buf:
                 with Image.open(buf) as img:
-                    image_tensor[idx] = torch.from_numpy(np.asarray(img, dtype=np.uint8))
+                    image_tensor[idx] = torch.from_numpy(np.array(img, dtype=np.uint8))
             if report_progress:
                 api.execution.set_progress(value=idx + 1, max_value=n_images)
     if as_float:

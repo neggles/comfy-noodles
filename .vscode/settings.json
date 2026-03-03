@@ -18,7 +18,17 @@
             "source.fixAll.pylance": "never"
         }
     },
-    "python.analysis.exclude": ["**/node_modules", "**/__pycache__", "**/.*"],
+    "python.analysis.exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        "**/venv",
+
+        "**/dist",
+        "**/build",
+        "**/web_custom_versions",
+        "**/user/_manager"
+    ],
 
     "[json]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode",

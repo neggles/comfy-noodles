@@ -14,6 +14,7 @@ from pydantic.types import AwareDatetime
 from ulid import ULID
 
 from noodles.utils import (
+    ValidateAnyMixin,
     compress_image_tensor_webp,
     decompress_image_tensor_webp,
     get_folders_in_outdir,
@@ -34,7 +35,7 @@ from .io import BootstrapModeIO, MaskParamsIO, MaskStrategyIO
 from .paths import find_segment_file, get_next_segment_iteration
 
 
-class LTXLat2VidSegmentData(BaseModel):
+class LTXLat2VidSegmentData(BaseModel, ValidateAnyMixin):
     video_id: ULID = Field(default_factory=ULID)
     parent_id: ULID | None = None
     segment_id: ULID = Field(default_factory=ULID)
@@ -97,18 +98,6 @@ class LTXLat2VidSegmentData(BaseModel):
     model_config: ConfigDict = ConfigDict(
         extra="ignore",
     )
-
-    @classmethod
-    def model_validate_any(cls, value: Any, strict: bool = False, extra: bool = True, **kwargs) -> "LTXLat2VidSegmentData":
-        match value:
-            case cls():
-                return value
-            case str() if value.strip():
-                return cls.model_validate_json(value, strict=strict, extra=extra, **kwargs)
-            case dict():
-                return cls.model_validate(value, strict=strict, extra=extra, **kwargs)
-            case _:
-                raise TypeError(f"Unsupported segment metadata type: {type(value)!r}")
 
 
 @io.comfytype(io_type="LAT2VID_SEGMENT")
@@ -183,7 +172,10 @@ def _compute_overlap_strengths(
     overlap_strengths = get_mask_decay_curve(
         mask_strat,
         total_k=total_k - 1,
-        **mask_params.model_dump(include={"hard_mask_k", "w_max", "w_min", "decay_sigma"}),
+        hard_mask_k=mask_params.hard_mask_k,
+        w_max=mask_params.w_max,
+        w_min=mask_params.w_min,
+        decay_sigma=mask_params.decay_sigma,
     )
     return [bootstrap_strength, *overlap_strengths]
 
@@ -287,7 +279,6 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                     display_name="segment_path",
                     tooltip="Full path to the saved segment file, including filename. Useful for debugging and chaining nodes that need to read the file.",
                 ),
-                io.String.Output(display_name="metadata_json", tooltip="Full segment metadata as JSON string for debugging purposes."),
                 io.String.Output(
                     display_name="video_prefix",
                     tooltip="File prefix for the saved segment. Feed to video save node if saving decoded video.",
@@ -300,6 +291,10 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                     display_name="frames",
                     tooltip="Frames for this segment, excluding overlap, for visualization purposes. Not used for processing.",
                 ),
+                LTXLat2VidSegmentIO.Output(
+                    display_name="metadata", tooltip="Segment metadata as a structured object for use in downstream nodes."
+                ),
+                io.String.Output(display_name="metadata_json", tooltip="Full segment metadata as JSON string for debugging purposes."),
             ],
             is_output_node=True,
         )
@@ -322,21 +317,22 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         mask_strat: MaskStrategy,
         mask_params: MaskParams,
     ) -> io.NodeOutput:
-        if not isinstance(mask_params, MaskParams):
-            mask_params = MaskParams.model_validate(mask_params, extra="ignore", strict=False)
-        if not isinstance(bootstrap_mode, BootstrapMode):
-            bootstrap_mode = BootstrapMode(bootstrap_mode)
-        if not isinstance(mask_strat, MaskStrategy):
-            mask_strat = MaskStrategy(mask_strat)
+        mask_params = MaskParams.model_validate_any(mask_params, strict=False)
+        bootstrap_mode = BootstrapMode(bootstrap_mode)
+        mask_strat = MaskStrategy(mask_strat)
 
         video_ulid = parse_ulid(video_id, "video_id", optional=True) or ULID()
         parent_ulid = parse_ulid(parent_id, "parent_id", optional=True)
         segment_id = ULID()
 
-        # build the output dir path with video name and ID\
-        if str(video_ulid) not in subfolder or segment_idx == 0:
-            subfolder = Path(subfolder).joinpath(f"{video_name}_{video_ulid}").as_posix().strip("/")
-        output_dir = get_output_dir_path() / subfolder
+        video_folder = f"{video_name}_{video_ulid}"
+
+        # the video folder may already be present, so don't add it if it is
+        if video_folder not in subfolder or segment_idx == 0:
+            subfolder = Path(subfolder).joinpath(video_folder).as_posix().strip("/")
+
+        output_root = get_output_dir_path()
+        output_dir = output_root / subfolder
 
         filename_prefix = f"{video_name}.v{str(video_ulid)[:10]}.s{segment_idx:03d}"
         # Get the next iteration number for this segment index to avoid overwriting existing files.
@@ -351,6 +347,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         # tail end of the aux file (frames/video) output prefixes
         aux_file_suffix = f"s{segment_idx:03d}_i{counter:03d}.{str(segment_id)[-4:]}"
 
+        # build the output prefixes for the other save nodes
         frames_prefix = f"{subfolder}/{segment_path.stem}/frames.{aux_file_suffix}/frame"
         video_prefix = f"{subfolder}/{segment_path.stem}/video.{aux_file_suffix}"
 
@@ -414,6 +411,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             "compressed_bootstrap": compressed_bootstrap.cpu().contiguous(),
             "ltx_l2v_format_v0": torch.tensor([]),
         }
+
         save_torch_file(
             output,
             segment_path,
@@ -424,14 +422,18 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             },
         )
 
+        # make segment_path relative to outdir before outputting
+        segment_path = segment_path.relative_to(get_output_dir_path())
+
         return io.NodeOutput(
             str(video_ulid),
             str(segment_id),
             str(segment_path),
-            metadata.model_dump_json(),
             video_prefix,
             frames_prefix,
             save_images,
+            metadata.model_dump_json(exclude={"prompt", "extra_pnginfo"}, indent=2),
+            metadata,
         )
 
 

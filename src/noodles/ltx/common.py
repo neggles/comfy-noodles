@@ -1,12 +1,11 @@
 from enum import StrEnum
-from typing import Any
 
 import numpy as np
 from comfy_api.latest import io, ui
 from pydantic import BaseModel, ConfigDict, Field
 from ulid import ULID
 
-from noodles.utils import parse_ulid
+from noodles.utils import ValidateAnyMixin, parse_ulid
 
 SEGMENT_METADATA_KEY = "ltx_l2v_segment"
 # this will be generated once per extension load
@@ -20,7 +19,7 @@ class BootstrapMode(StrEnum):
     RawLatent = "raw_latent"
 
 
-class MaskParams(BaseModel):
+class MaskParams(BaseModel, ValidateAnyMixin):
     hard_mask_k: int = Field(2, ge=1, le=256)
     w_max: float = Field(1.0, ge=0.0, le=1.0)
     w_min: float = Field(0.1, ge=0.0, le=1.0)
@@ -30,20 +29,9 @@ class MaskParams(BaseModel):
         extra="ignore",
     )
 
-    @classmethod
-    def model_validate_any(cls, value: Any, strict: bool = False, extra: bool = True, **kwargs) -> "MaskParams":
-        match value:
-            case cls():
-                return value
-            case str() if value.strip():
-                return cls.model_validate_json(value, strict=strict, extra=extra, **kwargs)
-            case dict():
-                return cls.model_validate(value, strict=strict, extra=extra, **kwargs)
-            case _:
-                raise TypeError(f"Unsupported segment metadata type: {type(value)!r}")
-
 
 class MaskStrategy(StrEnum):
+    NoStrategy = "no_strategy"
     SolidMask = "no_strategy"
     LinearDecay = "linear_decay"
     CosineDecayV1 = "cosine_decay_v1"
@@ -55,7 +43,7 @@ class MaskStrategy(StrEnum):
 def get_mask_decay_curve(
     mask_strat: MaskStrategy,
     total_k: int = 1,
-    hard_mask_k: int = 0,
+    hard_mask_k: int = 1,
     w_max: float = 1.0,
     w_min: float = 0.1,
     decay_sigma: float = 0.4,
@@ -66,7 +54,7 @@ def get_mask_decay_curve(
     if hard_mask_k > (total_k - 1):
         raise ValueError("hard_mask_k must be less than total_k.")
 
-    t = np.linspace(0, 1, total_k - hard_mask_k, dtype=np.float32)
+    t = np.linspace(0, 1, total_k - hard_mask_k + 1, dtype=np.float32)
     w = np.ones(total_k, dtype=np.float32)
 
     # pick a window function, here's some i prepared earlier
@@ -91,9 +79,9 @@ def get_mask_decay_curve(
 
     # apply scaling to w_min and w_max
     if mask_strat == MaskStrategy.SolidMask:
-        w[hard_mask_k:] = base
+        w[hard_mask_k - 1 :] = base
     else:
-        w[hard_mask_k:] = w_min + (w_max - w_min) * base
+        w[hard_mask_k - 1 :] = w_min + (w_max - w_min) * base
 
     # if hard_mask_k=0 then w[0] may not be exactly 1.0, so force it to 1.0 to ensure model coherency
     w[0] = 1.0
