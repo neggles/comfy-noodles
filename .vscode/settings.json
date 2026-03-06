@@ -30,6 +30,11 @@
         "**/user/_manager"
     ],
 
+    "python.analysis.extraPaths": [
+        "../../swarm/dlbackend/ComfyUI/",
+        "../../swarm/dlbackend/ComfyUI/custom_nodes/"
+    ],
+
     "[json]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode",
         "editor.detectIndentation": false,

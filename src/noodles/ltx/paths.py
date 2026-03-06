@@ -7,7 +7,7 @@ from ulid import ULID
 from noodles.utils import get_output_dir_path
 
 # segment format: <whatever>.s{segment_idx}_i{iteration}.{optional_id}.safetensors
-SEGMENT_ITER_RE = re.compile(r"\.s(?P<segment>\d+)_i(?P<iteration>\d+)(?:\.(?P<id>\w{4,6}))?\.safetensors$", re.I)
+SEGMENT_ITER_RE = re.compile(r"\.s(?P<segment>\d+)(?:_i(?P<iteration>\d+))?(?:\.(?P<id>\w{4,6}))?(?:\.safetensors)?$", re.I)
 # video folder format: {video_name}_v{video_ulid} (sometimes the `v` is missing)
 VIDEO_FOLDER_RE = re.compile(r"^(?P<video_name>.+)_v?(?P<video_ulid>\w{26})$", re.I)
 
@@ -67,7 +67,7 @@ def get_video_folder_by_id(id: str | ULID, prefix: str = "") -> Path:
 
 def parse_segment_name(path: Path) -> tuple[int, int, str | None] | None:
     """Parse segment and iteration numbers from a filename, if present.
-    Returns (segment, iteration, optional_id) or (None, None, None) if not found.
+    Returns (segment, iteration, optional_id | None) or (None, None, None) if not found.
     """
     # ensure path is a Path object
     path = Path(path)
@@ -126,11 +126,11 @@ def find_segment_file(video_folder: str, segment_idx: int, iteration: int, segme
     )
 
 
-def get_segment_iter(path: Path) -> int | None:
-    """Convenience function to extract just the iteration from a segment filename."""
+def get_segment_idx_iter(path: Path) -> tuple[int, int] | None:
+    """Convenience function to extract just the segment index and iteration from a segment filename."""
     segment, iteration, _ = parse_segment_name(path)
     if segment is not None and iteration is not None:
-        return iteration
+        return segment, iteration
     return None
 
 
@@ -141,10 +141,16 @@ def get_next_segment_iteration(filepath: PathLike) -> int:
     if not folder.is_dir():
         return 0
 
-    max_iter = 0
-    for f in folder.iterdir():
-        if f.is_file() and f.stem.startswith(filepath.stem):
-            if s_iter := get_segment_iter(f):
-                max_iter = max(max_iter, s_iter)
+    if parsed := parse_segment_name(filepath):
+        segment_idx, _, _ = parsed
+    else:
+        raise ValueError(f"Filepath does not match expected segment format: {filepath}")
+
+    max_iter = -1
+    for path in folder.glob(f"*.s{segment_idx}_i*.safetensors"):
+        if parsed := parse_segment_name(path):
+            _, iteration, _ = parsed
+            if iteration is not None and iteration > max_iter:
+                max_iter = iteration
 
     return max_iter + 1

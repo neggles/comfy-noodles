@@ -195,8 +195,9 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LTXLat2VidSegmentSaveNood",
-            display_name="LTX Lat2Vid Segment Save",
+            display_name="LTX-L2V Segment Save",
             category="noodles/ltx",
+            is_experimental=True,
             inputs=[
                 io.Image.Input(
                     "images",
@@ -205,8 +206,8 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                     tooltip="Frames for this segment, including overlap. Overlap will be trimmed before saving.",
                 ),
                 io.String.Input(
-                    "subfolder",
-                    display_name="Folder Name",
+                    "folder_prefix",
+                    display_name="Folder Prefix",
                     multiline=False,
                     default="ltx/",
                     tooltip="Folder prefix for the saved segment data. A subdirectory will be created for each video with the format {video_name}_{video_id}. Segments will be stored as safetensors files within the video directory.",
@@ -303,7 +304,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
     def execute(
         cls,
         images: torch.Tensor,
-        subfolder: str,
+        folder_prefix: str,
         latent: LatentInput,
         video_id: ULID | str | None,
         parent_id: ULID | str | None,
@@ -325,31 +326,33 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         parent_ulid = parse_ulid(parent_id, "parent_id", optional=True)
         segment_id = ULID()
 
-        video_folder = f"{video_name}_{video_ulid}"
-
-        # the video folder may already be present, so don't add it if it is
-        if video_folder not in subfolder or segment_idx == 0:
-            subfolder = Path(subfolder).joinpath(video_folder).as_posix().strip("/")
-
+        # get output root
         output_root = get_output_dir_path()
-        output_dir = output_root / subfolder
 
+        # build name of segment save folder
+        video_dirname = f"{video_name}_{video_ulid}"
+        # strip out the video_dirname from the folder_prefix (if present), trim slashes for consistency
+        folder_prefix = folder_prefix.replace(video_dirname, "").rstrip("\\/")
+        # then reassemble to ensure consistent formatting (no double slashes, etc)
+        video_folder = f"{folder_prefix}/{video_dirname}"
+
+        # build the segment filename prefix (minus iteration and ID suffix)
         filename_prefix = f"{video_name}.v{str(video_ulid)[:10]}.s{segment_idx:03d}"
         # Get the next iteration number for this segment index to avoid overwriting existing files.
-        counter = get_next_segment_iteration(output_dir / f"{filename_prefix}.safetensors")
-        # build the actual segment filename with the iteration and segment ID suffix (used to make parent-chasing simpler)
-        filename = f"{filename_prefix}_i{counter:03d}.{str(segment_id)[-6:]}.safetensors"
+        counter = get_next_segment_iteration(output_root / video_folder / filename_prefix)
+        # assemble the final segment filename
+        seg_filename = f"{filename_prefix}_i{counter:03d}.{str(segment_id)[-6:]}.safetensors"
 
         # build full segment path and ensure parent directories exist
-        segment_path = output_dir / filename
+        segment_path = output_root / video_folder / seg_filename
         segment_path.parent.mkdir(parents=True, exist_ok=True)
 
         # tail end of the aux file (frames/video) output prefixes
         aux_file_suffix = f"s{segment_idx:03d}_i{counter:03d}.{str(segment_id)[-4:]}"
 
         # build the output prefixes for the other save nodes
-        frames_prefix = f"{subfolder}/{segment_path.stem}/frames.{aux_file_suffix}/frame"
-        video_prefix = f"{subfolder}/{segment_path.stem}/video.{aux_file_suffix}"
+        frames_prefix = f"{video_folder}/{seg_filename}/frames.{aux_file_suffix}/frame"
+        video_prefix = f"{video_folder}/{seg_filename}/video.{aux_file_suffix}"
 
         samples: torch.Tensor = latent["samples"]
         if samples.ndim != 5:
@@ -394,7 +397,7 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             mask_strat=mask_strat,
             mask_params=mask_params,
             video_name=video_name,
-            subfolder=subfolder,
+            subfolder=folder_prefix,
             width_px=width_px,
             height_px=height_px,
             prompt=prompt_info,
@@ -442,7 +445,7 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LTXLat2VidSegmentLoadNood",
-            display_name="LTX Lat2Vid Segment Load",
+            display_name="LTX-L2V Segment Load",
             category="noodles/ltx",
             inputs=[
                 io.Combo.Input(
@@ -503,19 +506,30 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
             segment_data,
         )
 
+    @classmethod
+    def fingerprint_inputs(
+        cls,
+        video_folder: str,
+        segment_idx: int,
+        iteration: int,
+    ) -> str:
+        segment_path = find_segment_file(video_folder, segment_idx, iteration)
+        segment_hash = sha256(segment_path.read_bytes()).hexdigest()
+        return segment_hash
+
 
 class LTXLat2VidInplaceNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="LTXLat2VidInplaceNood",
-            display_name="LTX Lat2Vid Inplace",
+            display_name="LTX-L2V Inplace",
             category="noodles/ltx",
             inputs=[
                 io.Vae.Input("vae", optional=True),
                 io.Int.Input(
                     "noise_seed",
-                    display_name="Noise Seed",
+                    display_name="noise seed",
                     default=0,
                     min=0,
                     max=0xFFFFFFFFFFFFFFFF,
@@ -542,18 +556,19 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
                     max=512,
                     tooltip="Number of overlapped latents to carry into the next segment.",
                 ),
-                io.Combo.Input("bootstrap_mode", options=BootstrapMode, default=BootstrapMode.DummyLatent),
+                BootstrapModeIO.Input("bootstrap_mode", default=BootstrapMode.DummyLatent),
                 io.Float.Input(
                     "bootstrap_strength",
                     default=1.0,
                     min=0.0,
                     max=1.0,
                     step=0.01,
-                    display_name="strength",
+                    display_name="bootstrap strength",
                     tooltip="Strength of the bootstrap frame when doing inplace I2V. Should be 1.0 most of the time.",
+                    advanced=True,
                 ),
-                io.Combo.Input("mask_strat", options=MaskStrategy, default=MaskStrategy.CosineDecayV1),
-                MaskParamsIO.Input("mask_params", optional=True),
+                MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
+                MaskParamsIO.Input("mask_params"),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent"),
@@ -676,18 +691,17 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
         )
 
 
-class LTXLat2VidGetNextSegmentSaveDataNood(io.ComfyNode):
+class LTXLat2VidPrepNextDataNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="LTXLat2VidGetNextSegmentSaveDataNood",
-            display_name="LTX Lat2Vid Next Segment Data",
+            node_id="LTXLat2VidPrepNextDataNood",
+            display_name="LTX-L2V Prepare Segment Data",
             category="noodles/ltx",
             inputs=[
                 LTXLat2VidSegmentIO.Input(id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"),
             ],
             outputs=[
-                MaskParamsIO.Output(display_name="mask_params"),
                 io.Int.Output(display_name="overlap_k"),
                 BootstrapModeIO.Output(display_name="bootstrap_mode"),
                 MaskStrategyIO.Output(display_name="mask_strat"),
@@ -719,28 +733,25 @@ class LTXLat2VidGetNextSegmentSaveDataNood(io.ComfyNode):
         )
 
 
-class LTXLat2VidGetNextSegmentDataNood(io.ComfyNode):
+class LTXLat2VidPrepSaveDataNood(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="LTXLat2VidGetNextSegmentDataNood",
-            display_name="LTX Lat2Vid Next Segment Save Data",
+            node_id="LTXLat2VidPrepSaveDataNood",
+            display_name="LTX-L2V Prepare Save Data",
             category="noodles/ltx",
             inputs=[
                 LTXLat2VidSegmentIO.Input(id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"),
             ],
             outputs=[
-                MaskParamsIO.Output(display_name="mask_params"),
                 ComfyULID.Output(display_name="video_id"),
                 ComfyULID.Output(display_name="parent_id"),
-                io.String.Output(display_name="subfolder"),
+                io.String.Output(display_name="folder_prefix"),
                 io.String.Output(display_name="video_name"),
                 io.Int.Output(display_name="next_segment_idx"),
                 io.Int.Output(display_name="next_start_frame"),
                 io.Int.Output(display_name="n_frames_batch"),
                 io.Int.Output(display_name="overlap_k"),
-                BootstrapModeIO.Output(display_name="bootstrap_mode"),
-                MaskStrategyIO.Output(display_name="mask_strat"),
             ],
         )
 
@@ -756,18 +767,20 @@ class LTXLat2VidGetNextSegmentDataNood(io.ComfyNode):
         # increment segment idx for the next segment
         next_segment_idx = metadata.segment_idx + 1
 
+        # build name of segment save folder
+        video_dirname = f"{metadata.video_name}_{metadata.video_id}"
+        # strip out the video_dirname from the folder_prefix (if present), trim slashes for consistency
+        folder_prefix = metadata.subfolder.replace(video_dirname, "").strip("\\/")
+
         return io.NodeOutput(
-            metadata.mask_params,
             metadata.video_id,
             metadata.segment_id,
-            metadata.subfolder,
+            folder_prefix,
             metadata.video_name,
             next_segment_idx,
             next_start_frame,
             metadata.n_frames_batch,
             metadata.overlap_k,
-            metadata.bootstrap_mode,
-            metadata.mask_strat,
         )
 
 
@@ -782,7 +795,7 @@ class LTXMaskParamsNood(io.ComfyNode):
                 MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
                 io.Int.Input(
                     "hard_mask_k",
-                    default=2,
+                    default=1,
                     min=1,
                     max=32,
                     tooltip="Number of overlapped latents to hard-mask at strength 1.0 before decay.",
@@ -792,7 +805,7 @@ class LTXMaskParamsNood(io.ComfyNode):
                     default=1.0,
                     min=0.0,
                     max=1.0,
-                    step=0.01,
+                    step=0.05,
                     display_name="w_max",
                     tooltip="Maximum strength for the final latent in the overlap window.",
                 ),
@@ -801,7 +814,7 @@ class LTXMaskParamsNood(io.ComfyNode):
                     default=0.2,
                     min=0.0,
                     max=1.0,
-                    step=0.01,
+                    step=0.05,
                     display_name="w_min",
                     tooltip="Minimum strength for the final latent in the overlap window.",
                 ),
@@ -809,8 +822,8 @@ class LTXMaskParamsNood(io.ComfyNode):
                     "decay_sigma",
                     default=0.4,
                     min=0.0,
-                    max=1.0,
-                    step=0.01,
+                    max=2.0,
+                    step=0.05,
                     tooltip="Sigma for half-Gaussian decay curve.",
                 ),
             ],
