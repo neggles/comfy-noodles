@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING, Any
 import torch
 from comfy.sd import VAE
 from comfy.utils import load_torch_file, save_torch_file
-from comfy_api.latest import LatentInput, io
+from comfy_api.latest import ComfyAPI, LatentInput, io
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 from pydantic.types import AwareDatetime
 from ulid import ULID
 
 from noodles.utils import (
     ValidateAnyMixin,
-    api,
     compress_image_tensor_webp,
     decompress_image_tensor_webp,
     get_folders_in_outdir,
@@ -35,6 +34,8 @@ from .common import (
 )
 from .io import BootstrapModeIO, MaskParamsIO, MaskStrategyIO
 from .paths import find_segment_file, get_next_segment_iteration, list_segment_files
+
+api = ComfyAPI()
 
 
 class LTXLat2VidSegmentData(BaseModel, ValidateAnyMixin):
@@ -833,7 +834,7 @@ class LTXLat2VidAssembleSegmentChainNood(io.ComfyNode):
         )
 
     @classmethod
-    def execute(
+    async def execute(
         cls,
         chain: LTXLat2VidSegmentChainData | dict | str,
         strict: bool,
@@ -895,7 +896,7 @@ class LTXLat2VidAssembleSegmentChainNood(io.ComfyNode):
             max_end = max(max_end, end_frame)
             segment_metadata.append((segment_path, segment_data, start_frame, n_frames))
             prev_metadata = segment_data
-            api.execution.set_progress(value=idx + 1, max_value=total_steps)
+            await api.execution.set_progress(value=idx + 1, max_value=total_steps)
 
         if min_start is None or fps is None:
             raise ValueError("No segment metadata was loaded from chain")
@@ -950,7 +951,7 @@ class LTXLat2VidAssembleSegmentChainNood(io.ComfyNode):
             full_frames[dst_start:dst_end] = frames[: dst_end - dst_start]
 
             del state_dict
-            api.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
+            await api.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
 
         if full_frames is None:
             raise ValueError("No frames were loaded from chain")
@@ -966,6 +967,240 @@ class LTXLat2VidAssembleSegmentChainNood(io.ComfyNode):
             full_frames.contiguous(),
             out_start,
             out_n_frames,
+            fps,
+            filename_prefix,
+            json.dumps(chain.segment_paths, indent=2),
+        )
+
+    @classmethod
+    def fingerprint_inputs(
+        cls,
+        chain: LTXLat2VidSegmentChainData | dict | str,
+        strict: bool,
+    ) -> str:
+        chain = LTXLat2VidSegmentChainData.model_validate_any(chain)
+        fingerprint = sha256()
+        fingerprint.update(str(chain.video_id).encode("utf-8"))
+        fingerprint.update(str(strict).encode("utf-8"))
+
+        output_root = get_output_dir_path()
+        for segment_path in chain.segment_paths:
+            abs_path = Path(segment_path)
+            if not abs_path.is_absolute():
+                abs_path = output_root / abs_path
+            if not abs_path.exists():
+                fingerprint.update(f"missing:{segment_path}".encode())
+                continue
+            stats = abs_path.stat()
+            fingerprint.update(str(segment_path).encode("utf-8"))
+            fingerprint.update(str(stats.st_size).encode("utf-8"))
+            fingerprint.update(str(stats.st_mtime_ns).encode("utf-8"))
+
+        return fingerprint.hexdigest()
+
+
+class LTXLat2VidAssembleLatentChainNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXLat2VidAssembleLatentChainNood",
+            display_name="LTX-L2V Assemble Latent Chain",
+            category="noodles/ltx",
+            inputs=[
+                LTXLat2VidSegmentChainIO.Input(
+                    "chain",
+                    tooltip="Resolved segment chain from the chain resolver node.",
+                ),
+                io.Boolean.Input(
+                    "strict",
+                    default=True,
+                    label_on="Strict",
+                    label_off="Loose",
+                    tooltip="Validate parent linkage, ordering, fps, dimensions, and latent alignment while assembling.",
+                ),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="start_frame"),
+                io.Int.Output(display_name="n_frames"),
+                io.Int.Output(display_name="n_latents"),
+                io.Float.Output(display_name="fps"),
+                io.String.Output(
+                    display_name="filename_prefix",
+                    tooltip="Filename prefix for saving the assembled latent clip.",
+                ),
+                io.String.Output(
+                    display_name="segment_paths_json",
+                    tooltip="JSON list of source segment paths that were assembled.",
+                ),
+            ],
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        chain: LTXLat2VidSegmentChainData | dict | str,
+        strict: bool,
+    ) -> io.NodeOutput:
+        chain = LTXLat2VidSegmentChainData.model_validate_any(chain)
+        if not chain.segment_paths:
+            raise ValueError("Segment chain is empty")
+
+        expected_video_id = str(chain.video_id)
+        fps: float | None = None
+        min_start: int | None = None
+        max_end = 0
+        prev_metadata: LTXLat2VidSegmentData | None = None
+        segment_metadata: list[tuple[str, LTXLat2VidSegmentData, int, int, int]] = []
+        n_segments = len(chain.segment_paths)
+        total_steps = max(1, n_segments * 2)
+
+        # pass 1: metadata validation and output frame bounds
+        for idx, segment_path in enumerate(chain.segment_paths):
+            segment_data, _, _ = load_segment_metadata(segment_path)
+
+            if str(segment_data.video_id) != expected_video_id:
+                raise ValueError(f"Segment {segment_path} has video_id={segment_data.video_id}, expected {expected_video_id}")
+
+            if idx < len(chain.segment_ids):
+                expected_segment_id = str(chain.segment_ids[idx])
+                if str(segment_data.segment_id) != expected_segment_id:
+                    raise ValueError(f"Segment {segment_path} has segment_id={segment_data.segment_id}, expected {expected_segment_id}")
+
+            if fps is None:
+                fps = float(segment_data.fps)
+            elif strict and abs(float(segment_data.fps) - fps) > 1e-6:
+                raise ValueError(f"FPS mismatch in chain at {segment_path}: got {segment_data.fps}, expected {fps}")
+
+            if strict and prev_metadata is not None:
+                if segment_data.parent_id != prev_metadata.segment_id:
+                    raise ValueError(
+                        f"Chain linkage mismatch at {segment_path}: parent_id={segment_data.parent_id} "
+                        + f"but previous segment_id={prev_metadata.segment_id}"
+                    )
+                if segment_data.start_frame < prev_metadata.start_frame:
+                    raise ValueError(
+                        f"Non-monotonic start_frame in chain at {segment_path}: "
+                        + f"{segment_data.start_frame} < {prev_metadata.start_frame}"
+                    )
+
+            trim_lead_frames = 8 if int(segment_data.segment_idx) > 0 and int(segment_data.mask_params.hard_mask_k) >= 1 else 0
+            total_segment_frames = int(segment_data.n_frames)
+            if trim_lead_frames >= total_segment_frames:
+                raise ValueError(f"Segment {segment_path} has n_frames={total_segment_frames}, cannot trim {trim_lead_frames} lead frames")
+
+            start_frame = int(segment_data.start_frame) + trim_lead_frames
+            n_frames = total_segment_frames - trim_lead_frames
+            end_frame = start_frame + n_frames
+
+            min_start = start_frame if min_start is None else min(min_start, start_frame)
+            max_end = max(max_end, end_frame)
+            segment_metadata.append((segment_path, segment_data, start_frame, n_frames, trim_lead_frames))
+            prev_metadata = segment_data
+            await api.execution.set_progress(value=idx + 1, max_value=total_steps)
+
+        if min_start is None or fps is None:
+            raise ValueError("No segment metadata was loaded from chain")
+
+        out_start = min_start
+        out_n_frames = max_end - out_start
+        if out_n_frames < 1:
+            raise ValueError(f"Invalid assembled frame count: {out_n_frames}")
+        if out_n_frames > 1 and ((out_n_frames - 1) % 8 != 0):
+            raise ValueError(f"Assembled frame count {out_n_frames} is not compatible with packed LTX latent format (expected 1 + 8*k)")
+        out_n_latents = 1 + ((out_n_frames - 1) // 8) if out_n_frames > 1 else 1
+
+        full_samples: torch.Tensor | None = None
+        expected_sample_shape: tuple[int, int, int, int] | None = None
+        bootstrap_written = False
+
+        # pass 2: latent loading and assembly
+        for idx, (segment_path, metadata, _, _, trim_lead_frames) in enumerate(segment_metadata):
+            state_dict, segment_data, _, _ = load_segment_file(segment_path)
+            if "latent" not in state_dict:
+                raise ValueError(f"Segment file {segment_path} is missing required 'latent' tensor")
+
+            samples = state_dict["latent"].cpu().contiguous()
+            if samples.ndim != 5:
+                raise ValueError(f"Expected latent tensor with shape [B,C,T,H,W], got {samples.shape!r} in {segment_path}")
+
+            if strict and str(segment_data.segment_id) != str(metadata.segment_id):
+                raise ValueError(
+                    f"Segment metadata changed between resolve and load for {segment_path}: "
+                    + f"loaded {segment_data.segment_id}, expected {metadata.segment_id}"
+                )
+
+            sample_shape = (int(samples.shape[0]), int(samples.shape[1]), int(samples.shape[3]), int(samples.shape[4]))
+            if expected_sample_shape is None:
+                expected_sample_shape = sample_shape
+                full_samples = torch.zeros(
+                    (sample_shape[0], sample_shape[1], out_n_latents, sample_shape[2], sample_shape[3]),
+                    dtype=samples.dtype,
+                    device=samples.device,
+                )
+            elif sample_shape != expected_sample_shape:
+                raise ValueError(f"Latent shape mismatch while assembling chain: got {sample_shape}, expected {expected_sample_shape}")
+
+            if metadata.keep_bootstrap and trim_lead_frames == 0:
+                bootstrap_frame_start = int(metadata.start_frame)
+                if strict and bootstrap_frame_start != out_start:
+                    raise ValueError(
+                        f"Bootstrap latent in {segment_path} starts at frame {bootstrap_frame_start}, expected assembled start {out_start}"
+                    )
+                if bootstrap_frame_start == out_start:
+                    full_samples[:, :, 0:1, :, :] = samples[:, :, 0:1, :, :]
+                    bootstrap_written = True
+
+            first_block_idx = 1 + (trim_lead_frames // 8)
+            n_latents = int(samples.shape[2])
+            if first_block_idx >= n_latents:
+                raise ValueError(f"Segment {segment_path} has only {n_latents} latents, cannot start from latent index {first_block_idx}")
+
+            for src_latent_idx in range(first_block_idx, n_latents):
+                if metadata.keep_bootstrap:
+                    block_start_frame = int(metadata.start_frame) + 1 + (8 * (src_latent_idx - 1))
+                else:
+                    block_start_frame = int(metadata.start_frame) + (8 * (src_latent_idx - 1))
+
+                if block_start_frame < out_start + 1:
+                    continue
+
+                delta = block_start_frame - (out_start + 1)
+                if strict and (delta % 8) != 0:
+                    raise ValueError(
+                        f"Latent block alignment mismatch in {segment_path}: block_start_frame={block_start_frame}, out_start={out_start}"
+                    )
+                if (delta % 8) != 0:
+                    continue
+
+                dst_latent_idx = 1 + (delta // 8)
+                if dst_latent_idx < 1:
+                    continue
+                if dst_latent_idx >= out_n_latents:
+                    continue
+
+                full_samples[:, :, dst_latent_idx : dst_latent_idx + 1, :, :] = samples[:, :, src_latent_idx : src_latent_idx + 1, :, :]
+
+            del state_dict
+            await api.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
+
+        if full_samples is None:
+            raise ValueError("No latents were loaded from chain")
+        if not bootstrap_written:
+            raise ValueError("Assembled latent chain is missing bootstrap latent at output start frame")
+
+        output_root = get_output_dir_path()
+        video_folder = chain.video_folder.rstrip("\\/")
+        assembled_tail = str(chain.tail_segment_id)[-6:]
+        filename_tail = f"assembled-latent/{chain.video_name}.v{str(chain.video_id)[:10]}.full.{assembled_tail}"
+        filename_prefix = f"{video_folder}/{filename_tail}" if video_folder else filename_tail
+        output_root.joinpath(filename_prefix).parent.mkdir(parents=True, exist_ok=True)
+
+        return io.NodeOutput(
+            {"samples": full_samples.contiguous()},
+            out_start,
+            out_n_frames,
+            out_n_latents,
             fps,
             filename_prefix,
             json.dumps(chain.segment_paths, indent=2),

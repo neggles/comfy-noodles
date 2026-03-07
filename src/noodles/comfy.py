@@ -9,6 +9,7 @@ from .ltx.common import (
 )
 from .ltx.i2v import LTXImg2VidInplaceNood
 from .ltx.l2v import (
+    LTXLat2VidAssembleLatentChainNood,
     LTXLat2VidAssembleSegmentChainNood,
     LTXLat2VidInplaceNood,
     LTXLat2VidPrepNextDataNood,
@@ -26,6 +27,7 @@ from .misc import (
 
 _NODE_LIST = [
     AudioPreviewMelSpectrogramNood,
+    LTXLat2VidAssembleLatentChainNood,
     LTXLat2VidAssembleSegmentChainNood,
     LTXImg2VidInplaceNood,
     LTXLat2VidInplaceNood,
