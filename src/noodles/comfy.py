@@ -19,6 +19,7 @@ from .ltx.l2v import (
 from .misc import (
     AudioPreviewMelSpectrogramNood,
     StringIntAddNood,
+    VideoGenParamsNood,
 )
 
 _NODE_LIST = [
@@ -33,6 +34,7 @@ _NODE_LIST = [
     StringIntAddNood,
     ULIDFromStrNood,
     ULIDPreviewNood,
+    VideoGenParamsNood,
 ]
 
 try:

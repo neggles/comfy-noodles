@@ -9,23 +9,29 @@ API_BASE = "/noodles"
 routes = PromptServer.instance.routes
 
 
-@routes.get(f"{API_BASE}/ltx/videos")
-async def list_videos(request: web.Request) -> web.Response:
+@routes.get(API_BASE + "/ltx/videos")
+async def list_video_folders_endpoint(request: web.Request) -> web.Response:
     subfolder = request.query.get("subfolder", "").strip("/")
-    videos = []
-    for name, ulid, folder in list_video_folders(subfolder, recursive=True, return_tuple=True):
-        videos.append(
+    try:
+        video_folders = list_video_folders(subfolder, recursive=True, return_tuple=True)
+    except FileNotFoundError as e:
+        raise web.HTTPNotFound(text=f"Subfolder not found: {subfolder}") from e
+
+    response_data = []
+    for name, ulid, folder in video_folders:
+        response_data.append(
             {
                 "name": str(name),
                 "id": str(ulid),
                 "folder": folder.as_posix(),
             }
         )
-    return web.json_response(videos)
+
+    return web.json_response(response_data)
 
 
 @routes.get(API_BASE + r"/ltx/videos/{video_id:v?\w{26}}")
-async def get_video_by_id(request: web.Request) -> web.Response:
+async def get_video_by_id_endpoint(request: web.Request) -> web.Response:
     video_id = request.match_info["video_id"]
     try:
         video_ulid = ULID.from_str(video_id)
@@ -58,7 +64,7 @@ async def get_video_by_id(request: web.Request) -> web.Response:
 
 
 @routes.get(API_BASE + r"/ltx/videos/{video_id:v?\w{26}}/segments")
-async def list_video_segments(request: web.Request) -> web.Response:
+async def list_video_segments_endpoint(request: web.Request) -> web.Response:
     video_id = request.match_info["video_id"]
     try:
         video_ulid = ULID.from_str(video_id)
@@ -81,3 +87,9 @@ async def list_video_segments(request: web.Request) -> web.Response:
         )
 
     return web.json_response(segments)
+
+
+@routes.get(API_BASE + r"/ltx/ulid")
+async def generate_ulid_endpoint(request: web.Request) -> web.Response:
+    new_ulid = ULID()
+    return web.json_response([str(new_ulid)])

@@ -1,3 +1,7 @@
+from enum import StrEnum
+from math import ceil
+from typing import Any
+
 import numpy as np
 import torch
 from comfy_api.latest import AudioInput, io, ui
@@ -43,44 +47,6 @@ class StringIntAddNood(io.ComfyNode):
             raise ValueError(f"Could not convert '{in_a}' to an integer.") from e
 
         return io.NodeOutput(result=int_a + in_b)  # ty:ignore[unknown-argument]
-
-
-class LTXImg2VidParamsNood(io.ComfyNode):
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="noodles-LTXImg2VidParamsNood",
-            display_name="LTX Img2Vid Params",
-            category="noodles/ltx",
-            inputs=[
-                io.Int.Input("n_frames", display_name="Length (Frames)", default=121, min=1, step=8),
-                io.Float.Input("fps", display_name="Framerate", default=30.0, min=1, max=240),
-                io.Boolean.Input(
-                    "save_images",
-                    display_name="Save Images",
-                    default=False,
-                    label_on="Yes",
-                    label_off="No",
-                ),
-                io.Int.Input("width", display_name="Width (px)", default=1600, min=320, max=4096, step=32),
-                io.Int.Input("height", display_name="Height (px)", default=900, min=320, max=4096, step=32),
-            ],
-            outputs=[
-                io.Int.Output(display_name="n_frames"),
-                io.Float.Output(display_name="fps"),
-                io.Boolean.Output(display_name="Save Images"),
-                io.Int.Output(display_name="Width"),
-                io.Int.Output(display_name="Height"),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, *, num_frames: int, framerate: float, save_images: bool):
-        return io.NodeOutput(
-            num_frames,
-            framerate,
-            save_images,
-        )
 
 
 # WIP, not loaded yet
@@ -287,4 +253,153 @@ class AudioPreviewMelSpectrogramNood(io.ComfyNode):
         return io.NodeOutput(
             image,
             ui=ui.PreviewImage(image, cls=cls),
+        )
+
+
+class AspectRatioOption(StrEnum):
+    Square = "1:1"
+    OldPC = "4:3"
+    SemiWide = "3:2"
+    Landscape = "8:5"
+    Widescreen = "16:9"
+    UltraWide = "21:9"
+    ThreeFour = "3:4"
+    SemiTall = "2:3"
+    Portrait = "5:8"
+    Tall = "9:16"
+    UltraTall = "9:21"
+
+    def get_width_height(self, side_length: int) -> tuple[int, int]:
+        match self:
+            case AspectRatioOption.Square:
+                return side_length, side_length
+            case AspectRatioOption.OldPC:
+                return side_length, side_length * 3 // 4
+            case AspectRatioOption.SemiWide:
+                return side_length, side_length * 2 // 3
+            case AspectRatioOption.Landscape:
+                return side_length, side_length * 5 // 8
+            case AspectRatioOption.Widescreen:
+                return side_length, side_length * 9 // 16
+            case AspectRatioOption.UltraWide:
+                return side_length, side_length * 9 // 21
+            case AspectRatioOption.ThreeFour:
+                return side_length * 3 // 4, side_length
+            case AspectRatioOption.SemiTall:
+                return side_length * 2 // 3, side_length
+            case AspectRatioOption.Portrait:
+                return side_length * 5 // 8, side_length
+            case AspectRatioOption.Tall:
+                return side_length * 9 // 16, side_length
+            case AspectRatioOption.UltraTall:
+                return side_length * 9 // 21, side_length
+
+
+class VideoGenParamsNood(io.ComfyNode):
+    """
+    Convenience node to output basic parameters for LTX video generation.
+    Width, height, number of frames, frames per second as both float and int
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VideoGenParamsNood",
+            display_name="Video Generation Params",
+            category="noodles/ltx",
+            inputs=[
+                io.DynamicCombo.Input(
+                    id="res_mode",
+                    options=[
+                        io.DynamicCombo.Option(
+                            "Aspect Ratio",
+                            [
+                                io.Combo.Input(
+                                    "aspect_ratio",
+                                    display_name="Aspect Ratio",
+                                    options=AspectRatioOption,
+                                    default=AspectRatioOption.Widescreen,
+                                ),
+                                io.Int.Input(
+                                    "side_length_px",
+                                    display_name="Side Length (px)",
+                                    default=960,
+                                    min=32,
+                                    max=4096,
+                                    step=32,
+                                    display_mode=io.NumberDisplay.slider,
+                                ),
+                            ],
+                        ),
+                        io.DynamicCombo.Option(
+                            "Custom",
+                            [
+                                io.Int.Input("width_px", display_name="Width", default=960, min=32, max=4096, step=32),
+                                io.Int.Input("height_px", display_name="Height", default=544, min=32, max=4096, step=32),
+                            ],
+                        ),
+                    ],
+                    display_name="Resolution Mode",
+                ),
+                io.Int.Input(
+                    "n_frames",
+                    display_name="Frames",
+                    default=121,
+                    min=1,
+                    max=2049,
+                    step=8,
+                ),
+                io.Float.Input(
+                    "framerate",
+                    display_name="FPS",
+                    default=24.0,
+                    min=1.0,
+                    max=240.0,
+                    step=1.0,
+                ),
+            ],
+            outputs=[
+                io.Int.Output(display_name="width_px"),
+                io.Int.Output(display_name="height_px"),
+                io.Int.Output(display_name="n_frames"),
+                io.Float.Output(display_name="fps"),
+                io.Int.Output(display_name="fps_int"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        res_mode: dict[str, Any],
+        n_frames: int,
+        framerate: float,
+    ) -> io.NodeOutput:
+        match res_mode["res_mode"]:
+            case "Aspect Ratio":
+                aspect_ratio = AspectRatioOption(res_mode.get("aspect_ratio"))
+                side_length = int(res_mode.get("side_length_px", -1))
+                width_px, height_px = aspect_ratio.get_width_height(side_length)
+            case "Custom":
+                width_px = int(res_mode.get("width_px", -1))
+                height_px = int(res_mode.get("height_px", -1))
+            case _:
+                raise ValueError(f"Invalid resolution mode: {res_mode['res_mode']}")
+
+        if width_px < 32 or height_px < 32:
+            raise ValueError(f"Width and height must be at least 32 pixels. Got {width_px}x{height_px}.")
+
+        # round up shorter edge to nearest multiple of 32 if it's not already, to ensure compatibility with common video codecs and the LTX pipeline
+        if width_px < height_px and width_px % 32 != 0:
+            width_px = ((width_px + 31) // 32) * 32
+        elif height_px < width_px and height_px % 32 != 0:
+            height_px = ((height_px + 31) // 32) * 32
+
+        # round fps number to int (upwards)
+        framerate = ceil(framerate)
+        return io.NodeOutput(
+            width_px,
+            height_px,
+            n_frames,
+            float(framerate),
+            int(framerate),
         )

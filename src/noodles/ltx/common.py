@@ -19,25 +19,26 @@ class BootstrapMode(StrEnum):
     RawLatent = "raw_latent"
 
 
-class MaskParams(BaseModel, ValidateAnyMixin):
-    hard_mask_k: int = Field(2, ge=1, le=256)
-    w_max: float = Field(1.0, ge=0.0, le=1.0)
-    w_min: float = Field(0.1, ge=0.0, le=1.0)
-    decay_sigma: float = Field(0.4, ge=0.0, le=1.0)
-
-    model_config: ConfigDict = ConfigDict(
-        extra="ignore",
-    )
-
-
 class MaskStrategy(StrEnum):
     NoStrategy = "no_strategy"
-    SolidMask = "no_strategy"
-    LinearDecay = "linear_decay"
+    SolidMask = "solid_mask"
     CosineDecayV1 = "cosine_decay_v1"
     Smoothstep = "smoothstep"
     Smootherstep = "smootherstep"
     HalfGaussian = "half_gaussian"
+    LinearDecay = "linear_decay"
+
+
+class MaskParams(BaseModel, ValidateAnyMixin):
+    strategy: MaskStrategy = Field(MaskStrategy.NoStrategy, description="The masking strategy to use")
+    hard_mask_k: int = Field(2, ge=1, le=256, description="Number of latents to hard mask")
+    w_max: float = Field(1.0, ge=0.0, le=1.0, description="Maximum weight for the mask")
+    w_min: float = Field(0.25, ge=0.0, le=1.0, description="Minimum weight for the mask")
+    decay_sigma: float = Field(0.8, ge=0.0, le=2.0, description="Sigma value for the decay function")
+
+    model_config: ConfigDict = ConfigDict(
+        extra="ignore",
+    )
 
 
 def get_mask_decay_curve(
@@ -45,8 +46,8 @@ def get_mask_decay_curve(
     total_k: int = 1,
     hard_mask_k: int = 1,
     w_max: float = 1.0,
-    w_min: float = 0.1,
-    decay_sigma: float = 0.4,
+    w_min: float = 0.25,
+    decay_sigma: float = 0.8,
 ) -> list[float]:
     if total_k <= 1:
         return np.ones(total_k, dtype=np.float32).tolist()

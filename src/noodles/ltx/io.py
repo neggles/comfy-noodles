@@ -1,5 +1,7 @@
 from comfy_api.latest import io
 
+from noodles.utils import prune_dict
+
 from .common import BootstrapMode, MaskParams, MaskStrategy
 
 
@@ -46,7 +48,7 @@ class MaskStrategyIO(io.ComfyTypeIO):
             display_name: str = "Mask Strategy",
             optional: bool = False,
             tooltip: str = "Strategy for generating the mask weights for overlapping latents.",
-            default: MaskStrategy | str = None,
+            default: MaskStrategy | str | None = None,
             **kwargs,
         ):
             if isinstance(default, str):
@@ -79,6 +81,7 @@ class MaskParamsIO(io.ComfyTypeIO):
             optional=False,
             tooltip: str = None,
             lazy: bool = None,
+            default: MaskParams | dict | None = None,
             extra_dict=None,
             raw_link: bool = None,
             advanced: bool = None,
@@ -93,6 +96,10 @@ class MaskParamsIO(io.ComfyTypeIO):
                 raw_link=raw_link,
                 advanced=advanced,
             )
+            self.default = MaskParams.model_validate_any(default) if default is not None else None
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({"default": self.default})
 
     class Output(io.Output):
         pass

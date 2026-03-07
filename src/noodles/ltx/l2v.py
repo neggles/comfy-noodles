@@ -1,4 +1,5 @@
 import json
+import warnings
 from datetime import UTC, datetime
 from hashlib import sha256
 from os import PathLike
@@ -9,7 +10,7 @@ import torch
 from comfy.sd import VAE
 from comfy.utils import load_torch_file, save_torch_file
 from comfy_api.latest import LatentInput, io
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 from pydantic.types import AwareDatetime
 from ulid import ULID
 
@@ -43,6 +44,7 @@ class LTXLat2VidSegmentData(BaseModel, ValidateAnyMixin):
     segment_idx: int = Field(default=0, min=0, description="Index of the segment within the video.")
     iteration: int = Field(default=0, min=0, description="Iteration number for this segment.")
 
+    fps: float = Field(24.0, gt=0, description="Framerate for this segment.")
     start_frame: int = Field(
         ...,
         min=0,
@@ -82,8 +84,12 @@ class LTXLat2VidSegmentData(BaseModel, ValidateAnyMixin):
     )
 
     bootstrap_mode: BootstrapMode = BootstrapMode.DummyLatent
-    mask_strat: MaskStrategy = MaskStrategy.SolidMask
     mask_params: MaskParams = Field(default_factory=MaskParams)
+    mask_strat: MaskStrategy | None = Field(
+        None,
+        exclude=True,
+        deprecated="Use mask_params.strategy field instead",
+    )
 
     video_name: str = Field(default="untitled", description="Video name for organization purposes.")
     subfolder: str = Field(..., description="Subfolder that this segment was saved in originally.")
@@ -98,6 +104,16 @@ class LTXLat2VidSegmentData(BaseModel, ValidateAnyMixin):
     model_config: ConfigDict = ConfigDict(
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def update_mask_strategy(self) -> Any:
+        # prevents the validator emitting a deprecation warning
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            # move mask strategy from deprecated top-level field to mask_params if it's set and mask_params.strategy is still default
+            if self.mask_strat is not None and self.mask_params.strategy == MaskStrategy.NoStrategy:
+                self.mask_params.strategy = self.mask_strat
+        return self
 
 
 @io.comfytype(io_type="LAT2VID_SEGMENT")
@@ -149,7 +165,6 @@ def _compute_overlap_strengths(
     total_k: int,
     bootstrap_mode: BootstrapMode,
     bootstrap_strength: float | None = None,
-    mask_strat: MaskStrategy = ...,
     mask_params: MaskParams = ...,
 ) -> list[float]:
     if total_k < 2:
@@ -170,7 +185,7 @@ def _compute_overlap_strengths(
 
     # and overlap latents should be masked according to selected strategy.
     overlap_strengths = get_mask_decay_curve(
-        mask_strat,
+        mask_strat=mask_params.strategy,
         total_k=total_k - 1,
         hard_mask_k=mask_params.hard_mask_k,
         w_max=mask_params.w_max,
@@ -183,9 +198,9 @@ def _compute_overlap_strengths(
 def _deterministic_seed(
     prev_segment_data: LTXLat2VidSegmentData,
     seed: int,
-    overlap_count: int,
+    overlap_k: int,
 ) -> int:
-    seed_key = f"{prev_segment_data.video_id}|{prev_segment_data.segment_id}|{prev_segment_data.segment_idx}|{seed}|{overlap_count}"
+    seed_key = f"{prev_segment_data.video_id}|{prev_segment_data.segment_id}|{prev_segment_data.segment_idx}|{seed}|{overlap_k}"
     digest = sha256(seed_key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
@@ -270,7 +285,6 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
                     tooltip="Whether to drop the last latent before saving. The last latent is usually low-quality and best discarded.",
                 ),
                 BootstrapModeIO.Input("bootstrap_mode", default=BootstrapMode.DummyLatent),
-                MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
                 MaskParamsIO.Input("mask_params"),
             ],
             outputs=[
@@ -315,12 +329,10 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         overlap_k: int,
         drop_last_latent: bool,
         bootstrap_mode: BootstrapMode,
-        mask_strat: MaskStrategy,
         mask_params: MaskParams,
     ) -> io.NodeOutput:
         mask_params = MaskParams.model_validate_any(mask_params, strict=False)
         bootstrap_mode = BootstrapMode(bootstrap_mode)
-        mask_strat = MaskStrategy(mask_strat)
 
         video_ulid = parse_ulid(video_id, "video_id", optional=True) or ULID()
         parent_ulid = parse_ulid(parent_id, "parent_id", optional=True)
@@ -339,12 +351,12 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         # build the segment filename prefix (minus iteration and ID suffix)
         filename_prefix = f"{video_name}.v{str(video_ulid)[:10]}.s{segment_idx:03d}"
         # Get the next iteration number for this segment index to avoid overwriting existing files.
-        counter = get_next_segment_iteration(output_root / video_folder / filename_prefix)
+        counter = get_next_segment_iteration(output_root / video_folder / (filename_prefix + ".safetensors"))
         # assemble the final segment filename
-        seg_filename = f"{filename_prefix}_i{counter:03d}.{str(segment_id)[-6:]}.safetensors"
+        seg_filename = f"{filename_prefix}_i{counter:03d}.{str(segment_id)[-6:]}"
 
         # build full segment path and ensure parent directories exist
-        segment_path = output_root / video_folder / seg_filename
+        segment_path = output_root / video_folder / (seg_filename + ".safetensors")
         segment_path.parent.mkdir(parents=True, exist_ok=True)
 
         # tail end of the aux file (frames/video) output prefixes
@@ -352,7 +364,9 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
 
         # build the output prefixes for the other save nodes
         frames_prefix = f"{video_folder}/{seg_filename}/frames.{aux_file_suffix}/frame"
+        output_root.joinpath(frames_prefix).parent.mkdir(parents=True, exist_ok=True)
         video_prefix = f"{video_folder}/{seg_filename}/video.{aux_file_suffix}"
+        output_root.joinpath(video_prefix).parent.mkdir(parents=True, exist_ok=True)
 
         samples: torch.Tensor = latent["samples"]
         if samples.ndim != 5:
@@ -394,7 +408,6 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             keep_bootstrap=segment_idx == 0,
             drop_last_latent=drop_last_latent,
             bootstrap_mode=bootstrap_mode,
-            mask_strat=mask_strat,
             mask_params=mask_params,
             video_name=video_name,
             subfolder=folder_prefix,
@@ -445,7 +458,7 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LTXLat2VidSegmentLoadNood",
-            display_name="LTX-L2V Segment Load",
+            display_name="LTX-L2V Segment Loader",
             category="noodles/ltx",
             inputs=[
                 io.Combo.Input(
@@ -470,6 +483,74 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
                 io.Latent.Output(display_name="latent"),
                 io.Image.Output(display_name="frames"),
                 LTXLat2VidSegmentIO.Output(display_name="metadata"),
+            ],
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        video_folder: str,
+        segment_idx: int,
+        iteration: int,
+    ) -> io.NodeOutput:
+        segment_path = find_segment_file(video_folder, segment_idx, iteration)
+        state_dict, segment_data, _, _ = load_segment_file(segment_path)
+
+        if "latent" not in state_dict:
+            raise ValueError("Segment file is missing required 'latent' tensor")
+        if "frames" not in state_dict and "compressed_frames" not in state_dict:
+            raise ValueError("Segment file does not contain a frame tensor")
+
+        samples = state_dict["latent"].cpu().contiguous()
+        if "frames" in state_dict:
+            frames = state_dict["frames"].cpu().contiguous()
+        elif "compressed_frames" in state_dict:
+            frames = decompress_image_tensor_webp(
+                state_dict["compressed_frames"].cpu().contiguous(),
+                (segment_data.width_px, segment_data.height_px),
+                as_float=True,
+            )
+
+        latent: dict[str, torch.Tensor] = {"samples": samples}
+
+        return io.NodeOutput(
+            latent,
+            frames,
+            segment_data,
+        )
+
+    @classmethod
+    def fingerprint_inputs(
+        cls,
+        video_folder: str,
+        segment_idx: int,
+        iteration: int,
+    ) -> str:
+        segment_path = find_segment_file(video_folder, segment_idx, iteration)
+        segment_hash = sha256(segment_path.read_bytes()).hexdigest()
+        return segment_hash
+
+
+class LTXLat2VidVideoSelectNood(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXLat2VidVideoSelectNood",
+            display_name="LTX-L2V Video Selector",
+            category="noodles/ltx",
+            inputs=[
+                io.Combo.Input(
+                    "video_folder",
+                    options=get_folders_in_outdir(depth=2),
+                    tooltip="Subfolder to load segments from. Can be connected to save node's 'subfolder' output.",
+                ),
+            ],
+            outputs=[
+                io.String.Output(
+                    display_name="video_folder",
+                    tooltip="The selected video folder. Connect to segment load nodes to load segments from this video.",
+                ),
+                ComfyULID.Output(display_name="video_id", tooltip="ULID for the selected video."),
             ],
         )
 
@@ -567,7 +648,6 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
                     tooltip="Strength of the bootstrap frame when doing inplace I2V. Should be 1.0 most of the time.",
                     advanced=True,
                 ),
-                MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
                 MaskParamsIO.Input("mask_params"),
             ],
             outputs=[
@@ -589,7 +669,6 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
         overlap_k: int,
         bootstrap_mode: BootstrapMode,
         bootstrap_strength: float,
-        mask_strat: MaskStrategy,
         mask_params: MaskParams | dict | None,
     ) -> io.NodeOutput:
         prev_segment_data = LTXLat2VidSegmentData.model_validate_any(prev_metadata)
@@ -617,7 +696,7 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
         if bootstrap_mode == BootstrapMode.SegmentZero:
             raise ValueError("BootstrapMode.SegmentZero is only valid for the first segment and cannot be used for continuation")
 
-        new_seed = _deterministic_seed(prev_segment_data, seed=noise_seed, overlap_count=overlap_k)
+        new_seed = _deterministic_seed(prev_segment_data, seed=noise_seed, overlap_k=overlap_k)
 
         if bootstrap_mode == BootstrapMode.RawLatent:
             bootstrap_latent = source_latent
@@ -650,7 +729,6 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
             total_k=overlap_k,
             bootstrap_mode=bootstrap_mode,
             bootstrap_strength=bootstrap_strength,
-            mask_strat=mask_strat,
             mask_params=mask_params,
         )
 
@@ -674,7 +752,6 @@ class LTXLat2VidInplaceNood(io.ComfyNode):
                 "start_frame": next_start_frame,
                 "overlap_k": overlap_k,
                 "bootstrap_mode": bootstrap_mode,
-                "mask_strat": mask_strat,
                 "mask_params": mask_params,
             }
         )
@@ -699,21 +776,40 @@ class LTXLat2VidPrepNextDataNood(io.ComfyNode):
             display_name="LTX-L2V Prepare Segment Data",
             category="noodles/ltx",
             inputs=[
-                LTXLat2VidSegmentIO.Input(id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"),
+                LTXLat2VidSegmentIO.Input(
+                    id="metadata",
+                    display_name="metadata",
+                    tooltip="Previous segment metadata to unpack",
+                ),
+                MaskParamsIO.Input(
+                    "mask_params",
+                    optional=True,
+                    default=None,
+                    tooltip="Optional mask parameters to override those in the metadata for the next segment",
+                ),
             ],
             outputs=[
+                MaskParamsIO.Output(display_name="mask_params"),
                 io.Int.Output(display_name="overlap_k"),
                 BootstrapModeIO.Output(display_name="bootstrap_mode"),
-                MaskStrategyIO.Output(display_name="mask_strat"),
                 io.Int.Output(display_name="width_px"),
                 io.Int.Output(display_name="height_px"),
                 io.Int.Output(display_name="n_frames_batch"),
                 io.Int.Output(display_name="next_start_frame"),
+                io.Float.Output(display_name="fps"),
             ],
         )
 
     @classmethod
-    def execute(cls, metadata: LTXLat2VidSegmentData) -> io.NodeOutput:
+    def execute(
+        cls,
+        metadata: LTXLat2VidSegmentData,
+        mask_params: MaskParams | dict | None,
+    ) -> io.NodeOutput:
+        # override mask_params in metadata if new ones are provided, otherwise keep existing
+        if mask_params is not None:
+            metadata.mask_params = mask_params
+
         # work out the last frame index of the current segment so we can calculate the next segment's start frame
         last_end_frame = metadata.start_frame + metadata.n_frames
         # calculate how many frames of overlap, accounting for the first overlapped latent only actually counting for one frame of overlap
@@ -725,11 +821,11 @@ class LTXLat2VidPrepNextDataNood(io.ComfyNode):
             metadata.mask_params,
             metadata.overlap_k,
             metadata.bootstrap_mode,
-            metadata.mask_strat,
             metadata.width_px,
             metadata.height_px,
             metadata.n_frames_batch,
             next_start_frame,
+            metadata.fps,
         )
 
 
@@ -741,7 +837,11 @@ class LTXLat2VidPrepSaveDataNood(io.ComfyNode):
             display_name="LTX-L2V Prepare Save Data",
             category="noodles/ltx",
             inputs=[
-                LTXLat2VidSegmentIO.Input(id="metadata", display_name="metadata", tooltip="Previous segment metadata to unpack"),
+                LTXLat2VidSegmentIO.Input(
+                    id="metadata",
+                    display_name="metadata",
+                    tooltip="Previous segment metadata to unpack",
+                ),
             ],
             outputs=[
                 ComfyULID.Output(display_name="video_id"),
@@ -752,6 +852,7 @@ class LTXLat2VidPrepSaveDataNood(io.ComfyNode):
                 io.Int.Output(display_name="next_start_frame"),
                 io.Int.Output(display_name="n_frames_batch"),
                 io.Int.Output(display_name="overlap_k"),
+                io.Float.Output(display_name="fps"),
             ],
         )
 
@@ -770,7 +871,7 @@ class LTXLat2VidPrepSaveDataNood(io.ComfyNode):
         # build name of segment save folder
         video_dirname = f"{metadata.video_name}_{metadata.video_id}"
         # strip out the video_dirname from the folder_prefix (if present), trim slashes for consistency
-        folder_prefix = metadata.subfolder.replace(video_dirname, "").strip("\\/")
+        folder_prefix = metadata.subfolder.split(f"/{video_dirname}", 1)[0].rstrip("\\/")
 
         return io.NodeOutput(
             metadata.video_id,
@@ -781,6 +882,7 @@ class LTXLat2VidPrepSaveDataNood(io.ComfyNode):
             next_start_frame,
             metadata.n_frames_batch,
             metadata.overlap_k,
+            metadata.fps,
         )
 
 
@@ -789,10 +891,13 @@ class LTXMaskParamsNood(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LTXMaskParamsNood",
-            display_name="LTX Mask Params",
+            display_name="LTX L2V Mask Params",
             category="noodles/ltx",
             inputs=[
-                MaskStrategyIO.Input("mask_strat", default=MaskStrategy.CosineDecayV1),
+                MaskStrategyIO.Input(
+                    "strategy",
+                    default=MaskStrategy.NoStrategy,
+                ),
                 io.Int.Input(
                     "hard_mask_k",
                     default=1,
@@ -829,24 +934,24 @@ class LTXMaskParamsNood(io.ComfyNode):
             ],
             outputs=[
                 MaskParamsIO.Output(display_name="mask_params"),
-                MaskStrategyIO.Output(display_name="mask_strat"),
             ],
         )
 
     @classmethod
     def execute(
         cls,
-        mask_strat: MaskStrategy,
+        strategy: MaskStrategy,
         hard_mask_k: int,
         w_max: float,
         w_min: float,
         decay_sigma: float,
     ) -> dict:
         mask_params = MaskParams(
+            strategy=strategy,
             hard_mask_k=hard_mask_k,
             w_max=w_max,
             w_min=w_min,
             decay_sigma=decay_sigma,
         )
 
-        return io.NodeOutput(mask_params, mask_strat)
+        return io.NodeOutput(mask_params)

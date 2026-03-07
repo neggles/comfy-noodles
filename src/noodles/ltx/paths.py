@@ -65,7 +65,7 @@ def get_video_folder_by_id(id: str | ULID, prefix: str = "") -> Path:
     raise FileNotFoundError(f"No folder found for video ULID: {video_ulid}")
 
 
-def parse_segment_name(path: Path) -> tuple[int, int, str | None] | None:
+def parse_segment_name(path: Path) -> tuple[int, int | None, str | None] | None:
     """Parse segment and iteration numbers from a filename, if present.
     Returns (segment, iteration, optional_id | None) or (None, None, None) if not found.
     """
@@ -73,7 +73,13 @@ def parse_segment_name(path: Path) -> tuple[int, int, str | None] | None:
     path = Path(path)
     # attempt to parse segment, iteration, and optional id from the filename
     if match := SEGMENT_ITER_RE.search(path.name):
-        return int(match.group("segment")), int(match.group("iteration")), match.group("id")
+        s_num = match.group("segment")
+        i_num = match.group("iteration")
+        return (
+            int(s_num) if s_num is not None else -1,
+            int(i_num) if i_num is not None else -1,
+            match.group("id"),
+        )
     return None
 
 
@@ -147,7 +153,7 @@ def get_next_segment_iteration(filepath: PathLike) -> int:
         raise ValueError(f"Filepath does not match expected segment format: {filepath}")
 
     max_iter = -1
-    for path in folder.glob(f"*.s{segment_idx}_i*.safetensors"):
+    for path in folder.glob(f"*.s{segment_idx:03d}_i*.safetensors"):
         if parsed := parse_segment_name(path):
             _, iteration, _ = parsed
             if iteration is not None and iteration > max_iter:
