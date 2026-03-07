@@ -184,7 +184,7 @@ def compress_image_tensor_webp(
     if images.ndim == 3:
         images = images.unsqueeze(0)  # add batch dimension for easier processing
 
-    if images.dtype == torch.float32 and (images.min() <= 0.0 or images.max() >= 1.0):
+    if images.dtype == torch.float32 and (images.min() >= 0.0 and images.max() <= 1.0):
         images = images.mul(255.0).clamp_(0, 255)
     elif images.dtype != torch.uint8:
         raise ValueError(f"Unsupported image tensor dtype: {images.dtype}")
