@@ -7,7 +7,7 @@ else:
 
 __author__ = """Andi Powers-Holmes"""
 __email__ = "aholmes@omnom.net"
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 WEB_DIRECTORY = "./web"
