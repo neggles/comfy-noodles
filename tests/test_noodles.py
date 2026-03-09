@@ -1,10 +1,8 @@
-#!/usr/bin/env python
-
 """Tests for `noodles` package."""
 
 import pytest
 
-from noodles.extension import LTXImg2VidInplaceNood
+from noodles.comfy import LTXImg2VidInplaceNood
 
 
 @pytest.fixture

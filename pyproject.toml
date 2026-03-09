@@ -14,9 +14,17 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "huggingface-hub>=1.6.0",
+    "matplotlib>=3.10.8",
     "numpy>=2.2.6",
     "pydantic>=2.12.5",
     "python-ulid>=3.1.0",
+    "safetensors>=0.7.0",
+    "torch>=2.10.0",
+    "torchaudio>=0.25.0",
+    "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
+    "typer>=0.24.1",
 ]
 
 [project.urls]
@@ -31,18 +39,22 @@ docs = [
 ci = [
     "comfy-noodles[docs]", # include docs dependencies in ci group so that docs build will work in CI
 ]
-
-# duplication so that uv sync and uv pip install will both work. sigh
-[dependency-groups]
 dev = [
     "bump-my-version>=1.2.7",
     "coverage>=7.13.4",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
-    "ruff>=0.15.2",
+    "ruff>=0.15.5",
+]
+
+# duplication so that uv sync and uv pip install will both work. sigh
+[dependency-groups]
+dev = [
+    "comfy-noodles[dev]", # include dev dependencies in dev group
+    "comfy-noodles[ci]",  # include ci group (and thus docs group) in dev group
 ]
 docs = [
-    "mkdocs-material>=9.7.3",
+    "comfy-noodles[docs]", # include docs dependencies in docs group
 ]
 
 [build-system]
@@ -56,6 +68,17 @@ torch-backend = "auto"        # only affects `uv pip` commands
 
 [tool.uv.build-backend]
 module-name = "noodles"
+
+[tool.uv.sources]
+# default to cu129 for torch for now
+torch = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
 
 
 [tool.ruff]
@@ -91,6 +114,12 @@ unfixable = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402"]
+# overrides for tests
+"tests/**" = [
+    "D",    # ignore docstring requirements
+    "S101", # allow asserts
+    "S102", # allow exec/eval
+]
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = "double"

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ulid import ULID
 
-from noodles.utils import get_output_dir_path
+from ..utils import get_output_dir_path
 
 # segment format: <whatever>.s{segment_idx}_i{iteration}.{optional_id}.safetensors
 SEGMENT_ITER_RE = re.compile(r"\.s(?P<segment>\d+)(?:_i(?P<iteration>\d+))?(?:\.(?P<id>\w{4,6}))?(?:\.safetensors)?$", re.I)

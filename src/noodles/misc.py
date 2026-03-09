@@ -1,6 +1,5 @@
 from enum import StrEnum
 from math import ceil
-from typing import Any
 
 import numpy as np
 import torch
@@ -9,7 +8,7 @@ from matplotlib import pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from torchaudio import transforms as AT
 
-from noodles.utils import get_input_dir_path
+from .utils import RoundingMode, get_input_dir_path, round_to_multiple
 
 VIDEO_EXTNS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"}
 
@@ -54,34 +53,37 @@ class LoadVideoForAudioNood(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         input_dir = get_input_dir_path()
-        files = [f.relative_to(input_dir).as_posix() for f in input_dir.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTNS]
+        video_files = [
+            f.relative_to(input_dir).as_posix() for f in input_dir.rglob("**/*") if f.is_file() and f.suffix.lower() in VIDEO_EXTNS
+        ]
 
         return io.Schema(
             node_id="noodles-LoadVideoForAudioNood",
             display_name="Load Video for Audio",
             category="noodles/audio",
             is_experimental=True,
+            is_dev_only=True,  # not finished yet
             inputs=[
                 io.Combo.Input(
                     "video",
                     display_name="Video Path",
                     tooltip="Path to the video file to load audio from.",
-                    options=[str(f) for f in files],
+                    options=[str(f) for f in video_files],
                 ),
                 io.Float.Input(
-                    "framerate",
-                    display_name="Framerate",
+                    "fps",
+                    display_name="FPS",
                     default=30.0,
                     min=1,
                     max=240,
-                    tooltip="Framerate of your generation, used to snip segments for partial loads.",
+                    tooltip="FPS of your generation, used to snip segments for partial loads.",
                 ),
                 io.Int.Input(
                     "start_frame",
                     display_name="Start Frame",
                     default=0,
                     min=0,
-                    tooltip="Starting frame for this audio segment, at the given framerate.",
+                    tooltip="Starting frame for this audio segment, at the given FPS.",
                 ),
                 io.Int.Input(
                     "max_frames",
@@ -89,26 +91,40 @@ class LoadVideoForAudioNood(io.ComfyNode):
                     default=0,
                     min=0,
                     max=0xFFFFFFFF,
-                    tooltip="Number of frames worth of audio to output for this segment, at the given framerate.",
+                    tooltip="Number of frames worth of audio to output for this segment, at the given FPS.",
                 ),
             ],
             outputs=[
-                io.Audio.Output(display_name="Audio"),
-                io.Int.Output(display_name="Frame Count"),
-                io.Image.Output(display_name="First Frame"),
+                io.Audio.Output(display_name="audio"),
+                io.Float.Output(display_name="start_time", tooltip="Start time in seconds as calculated from start_frame + fps"),
+                io.Float.Output(display_name="duration", tooltip="Duration in seconds as calculated from n_frames + fps"),
+                io.Float.Output(display_name="fps", tooltip="The FPS value passed in, for convenience."),
+                io.Int.Output(display_name="n_frames", tooltip="Number of frames worth of audio actually loaded"),
+                io.Image.Output(display_name="image", tooltip="The first frame from the video, as a preview."),
             ],
         )
 
     @classmethod
-    def execute(
+    async def execute(
         cls,
         *,
         video_path: str,
-        framerate: float,
+        fps: float,
         start_frame: int,
         max_frames: int,
     ):
-        pass
+        # calculate the start time and max duration in seconds
+        start_time = start_frame / fps
+        max_duration = max_frames / fps if max_frames > 0 else None
+
+        return io.NodeOutput(
+            {},
+            start_time,
+            max_duration,
+            fps,
+            max_frames,
+            {},
+        )
 
 
 def plot_waveform(waveform: torch.Tensor, sr: int, title: str = "Waveform", ax=None):
@@ -270,29 +286,22 @@ class AspectRatioOption(StrEnum):
     UltraTall = "9:21"
 
     def get_width_height(self, side_length: int) -> tuple[int, int]:
-        match self:
-            case AspectRatioOption.Square:
-                return side_length, side_length
-            case AspectRatioOption.OldPC:
-                return side_length, side_length * 3 // 4
-            case AspectRatioOption.SemiWide:
-                return side_length, side_length * 2 // 3
-            case AspectRatioOption.Landscape:
-                return side_length, side_length * 5 // 8
-            case AspectRatioOption.Widescreen:
-                return side_length, side_length * 9 // 16
-            case AspectRatioOption.UltraWide:
-                return side_length, side_length * 9 // 21
-            case AspectRatioOption.ThreeFour:
-                return side_length * 3 // 4, side_length
-            case AspectRatioOption.SemiTall:
-                return side_length * 2 // 3, side_length
-            case AspectRatioOption.Portrait:
-                return side_length * 5 // 8, side_length
-            case AspectRatioOption.Tall:
-                return side_length * 9 // 16, side_length
-            case AspectRatioOption.UltraTall:
-                return side_length * 9 // 21, side_length
+        if self == AspectRatioOption.Square:
+            return side_length, side_length
+        w, h = self.as_tuple()
+
+        if w > h:
+            return side_length, ceil(side_length / (w / h))
+        else:
+            return ceil(side_length * (w / h)), side_length
+
+    def as_tuple(self) -> tuple[int, int]:
+        w, h = self.value.split(":")
+        return int(w), int(h)
+
+    def __float__(self):
+        w, h = self.as_tuple()
+        return w / h
 
 
 class VideoGenParamsNood(io.ComfyNode):
@@ -341,12 +350,19 @@ class VideoGenParamsNood(io.ComfyNode):
                     ],
                     display_name="Resolution Mode",
                 ),
+                io.Combo.Input(
+                    "res_step",
+                    display_name="Resolution Step",
+                    options=[8, 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256],
+                    default=32,
+                    tooltip="Ensure width and height are divisible by this number (should be 1x or 2x the VAE scale factor).",
+                ),
                 io.Int.Input(
                     "n_frames",
                     display_name="Frames",
-                    default=121,
+                    default=161,
                     min=1,
-                    max=2049,
+                    max=1025,
                     step=8,
                 ),
                 io.Float.Input(
@@ -359,18 +375,24 @@ class VideoGenParamsNood(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Int.Output(display_name="width_px"),
-                io.Int.Output(display_name="height_px"),
-                io.Int.Output(display_name="n_frames"),
-                io.Float.Output(display_name="fps"),
-                io.Int.Output(display_name="fps_int"),
+                io.Int.Output(display_name="width_px", tooltip="Width in pixels, rounded up to be divisible by the 'Divisible By' input."),
+                io.Int.Output(
+                    display_name="height_px", tooltip="Height in pixels, rounded up to be divisible by the 'Divisible By' input."
+                ),
+                io.Int.Output(display_name="n_frames", tooltip="Number of frames to generate."),
+                io.Float.Output(display_name="fps", tooltip="Framerate as a float, in case you want 23.976 or similar. You monster."),
+                io.Int.Output(display_name="fps_int", tooltip="Framerate as an integer, rounded up from the 'fps' output."),
+                io.Float.Output(
+                    display_name="aspect_ratio", tooltip="Actual aspect ratio of the output video, as a float (width / height)."
+                ),
             ],
         )
 
     @classmethod
     def execute(
         cls,
-        res_mode: dict[str, Any],
+        res_mode: dict[str, str | int],
+        res_step: int,
         n_frames: int,
         framerate: float,
     ) -> io.NodeOutput:
@@ -378,28 +400,32 @@ class VideoGenParamsNood(io.ComfyNode):
             case "Aspect Ratio":
                 aspect_ratio = AspectRatioOption(res_mode.get("aspect_ratio"))
                 side_length = int(res_mode.get("side_length_px", -1))
+                # ensure side length is divisible by the 'res_step' input, rounding up as needed
+                side_length = round_to_multiple(side_length, res_step, mode=RoundingMode.Ceil)
+                # get width and height from aspect ratio
                 width_px, height_px = aspect_ratio.get_width_height(side_length)
             case "Custom":
                 width_px = int(res_mode.get("width_px", -1))
                 height_px = int(res_mode.get("height_px", -1))
+
             case _:
                 raise ValueError(f"Invalid resolution mode: {res_mode['res_mode']}")
+
+        # ensure width and height are divisible by the 'res_step' input, rounding up as needed
+        width_px = round_to_multiple(width_px, res_step, mode=RoundingMode.Ceil)
+        height_px = round_to_multiple(height_px, res_step, mode=RoundingMode.Ceil)
 
         if width_px < 32 or height_px < 32:
             raise ValueError(f"Width and height must be at least 32 pixels. Got {width_px}x{height_px}.")
 
-        # round up shorter edge to nearest multiple of 32 if it's not already, to ensure compatibility with common video codecs and the LTX pipeline
-        if width_px < height_px and width_px % 32 != 0:
-            width_px = ((width_px + 31) // 32) * 32
-        elif height_px < width_px and height_px % 32 != 0:
-            height_px = ((height_px + 31) // 32) * 32
+        # round framerate to 3 decimal places on principle
+        framerate = round(framerate, 3)
 
-        # round fps number to int (upwards)
-        framerate = ceil(framerate)
         return io.NodeOutput(
             width_px,
             height_px,
             n_frames,
-            float(framerate),
-            int(framerate),
+            framerate,
+            ceil(framerate),
+            width_px / height_px,
         )

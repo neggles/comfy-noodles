@@ -1,11 +1,15 @@
 from enum import StrEnum
+from math import ceil
 
 import numpy as np
+import torch
+from comfy import model_management
 from comfy_api.latest import io, ui
 from pydantic import BaseModel, ConfigDict, Field
 from ulid import ULID
 
-from noodles.utils import ValidateAnyMixin, parse_ulid
+from ..misc import AspectRatioOption
+from ..utils import RoundingMode, ValidateAnyMixin, parse_ulid, round_to_multiple
 
 SEGMENT_METADATA_KEY = "ltx_l2v_segment"
 # this will be generated once per extension load
@@ -208,4 +212,135 @@ class ULIDFromStrNood(io.ComfyNode):
         return io.NodeOutput(
             ulid,
             ui=ui.PreviewText(f"`{str(ulid)}`"),
+        )
+
+
+class LTX2StageParamsNood(io.ComfyNode):
+    """
+    Convenience node to output basic parameters for LTX 2-stage latent-upscale video generation.
+    Width, height, number of frames, frames per second as both float and int
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTX2StageParamsNood",
+            display_name="LTX 2-Stage Params",
+            category="noodles/ltx",
+            inputs=[
+                io.DynamicCombo.Input(
+                    id="res_mode",
+                    options=[
+                        io.DynamicCombo.Option(
+                            "Aspect Ratio",
+                            [
+                                io.Combo.Input(
+                                    "aspect_ratio",
+                                    display_name="Aspect Ratio",
+                                    options=AspectRatioOption,
+                                    default=AspectRatioOption.Widescreen,
+                                ),
+                                io.Int.Input(
+                                    "side_length",
+                                    display_name="Side Length",
+                                    default=1920,
+                                    min=1280,
+                                    max=5760,
+                                    step=64,
+                                    display_mode=io.NumberDisplay.slider,
+                                ),
+                            ],
+                        ),
+                        io.DynamicCombo.Option(
+                            "Custom",
+                            [
+                                io.Int.Input("width", display_name="Width", default=1920, min=576, max=5760, step=64),
+                                io.Int.Input("height", display_name="Height", default=1080, min=576, max=5760, step=64),
+                            ],
+                        ),
+                    ],
+                    display_name="Resolution Mode",
+                ),
+                io.Int.Input(
+                    "n_frames",
+                    display_name="Frames",
+                    default=161,
+                    min=1,
+                    max=1025,
+                    step=8,
+                ),
+                io.Float.Input(
+                    "framerate",
+                    display_name="FPS",
+                    default=24.0,
+                    min=1.0,
+                    max=240.0,
+                    step=1.0,
+                ),
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent", tooltip="Empty latent for first stage (half the size of the final output)"),
+                io.Int.Output(display_name="s1_width", tooltip="Final width in pixels"),
+                io.Int.Output(display_name="s1_height", tooltip="Final height in pixels"),
+                io.Int.Output(display_name="s2_width", tooltip="Final width in pixels"),
+                io.Int.Output(display_name="s2_height", tooltip="Final height in pixels"),
+                io.Int.Output(display_name="n_frames", tooltip="Number of frames to generate."),
+                io.Float.Output(display_name="fps", tooltip="Framerate as a float, in case you want 23.976 or similar. You monster."),
+                io.Int.Output(display_name="fps_int", tooltip="Framerate as an integer, rounded up from the 'fps' output."),
+                io.Float.Output(display_name="aspect", tooltip="Actual aspect ratio of the output video, as a float (width / height)."),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        res_mode: dict[str, str | int],
+        n_frames: int,
+        framerate: float,
+    ) -> io.NodeOutput:
+        # round framerate to 3 decimal places on principle
+        framerate = round(framerate, 3)
+
+        # GET
+        match res_mode["res_mode"]:
+            case "Aspect Ratio":
+                aspect_ratio = AspectRatioOption(res_mode.get("aspect_ratio"))
+                side_length = int(res_mode.get("side_length", -1))
+                side_length = round_to_multiple(side_length, 64, mode=RoundingMode.Ceil)
+                # get width and height from aspect ratio
+                width_px, height_px = aspect_ratio.get_width_height(side_length)
+            case "Custom":
+                width_px = int(res_mode.get("width", -1))
+                height_px = int(res_mode.get("height", -1))
+            case _:
+                raise ValueError(f"Invalid resolution mode: {res_mode['res_mode']}")
+
+        if width_px < 64 or height_px < 64:
+            raise ValueError(f"Width and height must be at least 64 pixels. Got {width_px}x{height_px}.")
+
+        # ensure width and height are divisible by 64, rounding up as needed
+        width_px = round_to_multiple(width_px, 64, mode=RoundingMode.Ceil)
+        height_px = round_to_multiple(height_px, 64, mode=RoundingMode.Ceil)
+
+        # get stage2 latent size
+        stage1_lat_w, stage1_lat_h = width_px // 64, height_px // 64
+
+        # create stage1 empty latent
+        stage1_latent = {
+            "samples": torch.zeros(
+                [1, 128, ((n_frames - 1) // 8) + 1, stage1_lat_h, stage1_lat_w],
+                device=model_management.intermediate_device(),
+            )
+        }
+
+        return io.NodeOutput(
+            stage1_latent,
+            width_px // 2,
+            height_px // 2,
+            width_px,
+            height_px,
+            n_frames,
+            framerate,
+            ceil(framerate),
+            width_px / height_px,
         )

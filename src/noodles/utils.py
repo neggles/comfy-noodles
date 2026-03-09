@@ -1,7 +1,9 @@
 import inspect
 import json
 import warnings
+from enum import StrEnum
 from io import BytesIO
+from math import ceil, floor
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -15,9 +17,9 @@ from ulid import ULID
 try:
     from comfy_api.latest import ComfyAPISync
 
-    api = ComfyAPISync()
+    _API = ComfyAPISync()
 except (ImportError, ModuleNotFoundError):
-    # comfy API is optional for these functions, so we can just use a dummy object to avoid NameErrors
+    # comfy _API is optional for these functions, so we can just use a dummy object to avoid NameErrors
     class DummyAPI:
         def __init__(self, *args, **kwargs):
             self.execution = self
@@ -25,7 +27,31 @@ except (ImportError, ModuleNotFoundError):
         def set_progress(self, *args, **kwargs):
             pass
 
-    api = DummyAPI()
+    _API = DummyAPI()
+
+
+class RoundingMode(StrEnum):
+    Ceil = "ceil"
+    Floor = "floor"
+    Nearest = "nearest"
+    ToZero = "to_zero"
+
+
+def round_to_multiple(value: int, step: int, mode: RoundingMode | str = RoundingMode.Ceil) -> int:
+    if step <= 0:
+        raise ValueError("step must be > 0")
+    match mode:
+        case RoundingMode.Ceil:
+            return ceil(value / step) * step
+        case RoundingMode.Floor:
+            return floor(value / step) * step
+        case RoundingMode.Nearest:
+            return round(value / step) * step
+        case RoundingMode.ToZero:
+            return floor(value / step) * step if value >= 0 else ceil(value / step) * step
+        case _:
+            raise ValueError(f"Invalid rounding mode: {mode}")
+
 
 # for the mixin
 T = TypeVar("T", bound=BaseModel)
@@ -199,7 +225,7 @@ def compress_image_tensor_webp(
         pil_image.save(webp_buf, format="WebP", lossless=True, quality=0, method=0)
         webp_tensors.append(torch.frombuffer(webp_buf.getbuffer(), dtype=torch.uint8))
         if report_progress:
-            api.execution.set_progress(value=len(webp_tensors), max_value=len(ndimages))
+            _API.execution.set_progress(value=len(webp_tensors), max_value=len(ndimages))
 
     compressed_tensor = torch.nested.nested_tensor(webp_tensors, dtype=torch.uint8, layout=torch.jagged)
     if return_padded:
@@ -226,7 +252,7 @@ def decompress_image_tensor_webp(
                 with Image.open(buf) as img:
                     image_tensor[idx] = torch.from_numpy(np.array(img, dtype=np.uint8))
             if report_progress:
-                api.execution.set_progress(value=idx + 1, max_value=n_images)
+                _API.execution.set_progress(value=idx + 1, max_value=n_images)
     if as_float:
         image_tensor = image_tensor.to(torch.float32).div_(255.0)
 

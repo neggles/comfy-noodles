@@ -1,7 +1,6 @@
 from comfy_api.latest import io
 
-from noodles.utils import prune_dict
-
+from ..utils import prune_dict
 from .common import BootstrapMode, MaskParams, MaskStrategy
 
 

@@ -4,10 +4,13 @@ from comfy_api.latest import ComfyAPI, ComfyExtension, io
 
 # need to import to register routes, even if not used directly
 from .ltx.common import (
+    LTX2StageParamsNood,
     ULIDFromStrNood,
     ULIDPreviewNood,
 )
-from .ltx.i2v import LTXImg2VidInplaceNood
+from .ltx.i2v import (
+    LTXImg2VidInplaceNood,
+)
 from .ltx.l2v import (
     LTXLat2VidAssembleLatentChainNood,
     LTXLat2VidAssembleSegmentChainNood,
@@ -21,15 +24,18 @@ from .ltx.l2v import (
 )
 from .misc import (
     AudioPreviewMelSpectrogramNood,
+    LoadVideoForAudioNood,
     StringIntAddNood,
     VideoGenParamsNood,
 )
 
 _NODE_LIST = [
     AudioPreviewMelSpectrogramNood,
+    LoadVideoForAudioNood,
+    LTX2StageParamsNood,
+    LTXImg2VidInplaceNood,
     LTXLat2VidAssembleLatentChainNood,
     LTXLat2VidAssembleSegmentChainNood,
-    LTXImg2VidInplaceNood,
     LTXLat2VidInplaceNood,
     LTXLat2VidPrepNextDataNood,
     LTXLat2VidPrepSaveDataNood,
@@ -44,27 +50,27 @@ _NODE_LIST = [
 ]
 
 try:
-    api = ComfyAPI()
+    _API = ComfyAPI()
 except Exception:
-    api = None  # type: ignore[assignment]
+    _API = None  # type: ignore[assignment]
 
 
 async def remap_old_node_ids():
-    if not api:
+    if not _API:
         return
 
     # fix when I got the prep-save and prep-next nodes mixed up and they ended up with the wrong IDs (oops)
-    await api.node_replacement.register(
+    await _API.node_replacement.register(
         io.NodeReplace(old_node_id="LTXLat2VidGetNextSegmentDataNood", new_node_id="LTXLat2VidPrepSaveDataNood")
     )
-    await api.node_replacement.register(
+    await _API.node_replacement.register(
         io.NodeReplace(old_node_id="LTXLat2VidGetNextSegmentSaveDataNood", new_node_id="LTXLat2VidPrepNextDataNood")
     )
 
 
 class NoodlesExtension(ComfyExtension):
     async def on_load(self) -> None:
-        if not api:
+        if not _API:
             warnings.warn("Failed to initialize ComfyAPI, making the extension a no-op.", RuntimeWarning, stacklevel=2)
             return
         from . import routes  # noqa: F401

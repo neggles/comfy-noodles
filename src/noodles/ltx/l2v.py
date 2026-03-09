@@ -14,16 +14,14 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validat
 from pydantic.types import AwareDatetime
 from ulid import ULID
 
-from noodles.utils import (
+from ..utils import (
     ValidateAnyMixin,
     compress_image_tensor_webp,
     decompress_image_tensor_webp,
     get_folders_in_outdir,
     get_output_dir_path,
     parse_ulid,
-    prune_dict,
 )
-
 from .common import (
     SEGMENT_METADATA_KEY,
     BootstrapMode,
@@ -35,7 +33,7 @@ from .common import (
 from .io import BootstrapModeIO, MaskParamsIO, MaskStrategyIO
 from .paths import find_segment_file, get_next_segment_iteration, list_segment_files
 
-api = ComfyAPI()
+_API = ComfyAPI()
 
 
 class LTXLat2VidSegmentData(BaseModel, ValidateAnyMixin):
@@ -547,29 +545,19 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
         video_prefix = f"{video_folder}/{seg_filename}/video.{aux_file_suffix}"
         output_root.joinpath(video_prefix).parent.mkdir(parents=True, exist_ok=True)
 
-        samples: torch.Tensor = latent["samples"]
+        samples: torch.Tensor = latent["samples"].cpu().contiguous()
         if samples.ndim != 5:
             raise ValueError(f"Expected latent['samples'] with shape [B,C,T,H,W], got {samples.shape!r}")
 
         if drop_last_latent:
-            if samples.shape[2] <= 1:
-                raise ValueError("Cannot drop terminal latent when only one latent is present")
             samples = samples[:, :, :-1, :, :]
             images = images[:-8]
 
-        if segment_idx == 0:
-            bootstrap_frame = images[:1]
-            save_images = images
-        else:
-            bootstrap_frame = images[:1]
-            save_images = images[1:]
+        bootstrap_frame = images[:1]
+        save_images = images if segment_idx == 0 else images[1:]
 
         width_px = int(save_images.shape[2])
         height_px = int(save_images.shape[1])
-
-        prompt_info = prune_dict(cls.hidden.prompt or {})
-        extra_pnginfo = prune_dict(cls.hidden.extra_pnginfo or {})
-
         n_latents = int(samples.shape[2])
         n_frames = int(save_images.shape[0])
 
@@ -592,8 +580,8 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             subfolder=folder_prefix,
             width_px=width_px,
             height_px=height_px,
-            prompt=prompt_info,
-            extra_pnginfo=extra_pnginfo,
+            prompt=cls.hidden.prompt,
+            extra_pnginfo=cls.hidden.extra_pnginfo,
         )
 
         compressed_frames = compress_image_tensor_webp(save_images, report_progress=True)
@@ -612,8 +600,8 @@ class LTXLat2VidSegmentSaveNood(io.ComfyNode):
             segment_path,
             metadata={
                 SEGMENT_METADATA_KEY: metadata.model_dump_json(exclude={"prompt", "extra_pnginfo"}),
-                "prompt": json.dumps(prompt_info),
-                "extra_pnginfo": json.dumps(extra_pnginfo),
+                "prompt": json.dumps(cls.hidden.prompt),
+                "extra_pnginfo": json.dumps(cls.hidden.extra_pnginfo),
             },
         )
 
@@ -720,9 +708,14 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
         segment_idx: int,
         iteration: int,
     ) -> str:
-        segment_path = find_segment_file(video_folder, segment_idx, iteration)
-        segment_hash = sha256(segment_path.read_bytes()).hexdigest()
-        return segment_hash
+        segment_path = find_segment_file(video_folder, segment_idx, iteration).resolve()
+        segment_stat = segment_path.stat()
+
+        fingerprint = sha256()
+        fingerprint.update(str(segment_path).encode("utf-8"))
+        fingerprint.update(str(segment_stat.st_size).encode("utf-8"))
+        fingerprint.update(str(segment_stat.st_mtime_ns).encode("utf-8"))
+        return fingerprint.hexdigest()
 
 
 class LTXLat2VidResolveSegmentChainNood(io.ComfyNode):
@@ -745,10 +738,8 @@ class LTXLat2VidResolveSegmentChainNood(io.ComfyNode):
                     display_name="segment_paths_json",
                     tooltip="JSON list of resolved segment paths in playback order (start -> end).",
                 ),
-                io.Int.Output(display_name="segment_count"),
                 ComfyULID.Output(display_name="video_id"),
-                ComfyULID.Output(display_name="head_segment_id"),
-                ComfyULID.Output(display_name="tail_segment_id"),
+                ComfyULID.Output(display_name="head_id"),
             ],
         )
 
@@ -767,10 +758,8 @@ class LTXLat2VidResolveSegmentChainNood(io.ComfyNode):
         return io.NodeOutput(
             chain,
             json.dumps(chain.segment_paths, indent=2),
-            chain.segment_count,
             chain.video_id,
             chain.head_segment_id,
-            chain.tail_segment_id,
         )
 
     @classmethod
@@ -782,9 +771,7 @@ class LTXLat2VidResolveSegmentChainNood(io.ComfyNode):
         video_folder = get_video_folder_from_segment_metadata(metadata)
 
         fingerprint = sha256()
-        fingerprint.update(str(metadata.video_id).encode("utf-8"))
-        fingerprint.update(str(metadata.segment_id).encode("utf-8"))
-        fingerprint.update(video_folder.encode("utf-8"))
+        fingerprint.update(metadata.model_dump_json(exclude={"prompt", "extra_pnginfo"}).encode("utf-8"))
 
         output_root = get_output_dir_path()
         for _, _, segment_path, _ in list_segment_files(video_folder, return_tuple=True):
@@ -896,7 +883,7 @@ class LTXLat2VidAssembleSegmentChainNood(io.ComfyNode):
             max_end = max(max_end, end_frame)
             segment_metadata.append((segment_path, segment_data, start_frame, n_frames))
             prev_metadata = segment_data
-            await api.execution.set_progress(value=idx + 1, max_value=total_steps)
+            await _API.execution.set_progress(value=idx + 1, max_value=total_steps)
 
         if min_start is None or fps is None:
             raise ValueError("No segment metadata was loaded from chain")
@@ -951,7 +938,7 @@ class LTXLat2VidAssembleSegmentChainNood(io.ComfyNode):
             full_frames[dst_start:dst_end] = frames[: dst_end - dst_start]
 
             del state_dict
-            await api.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
+            await _API.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
 
         if full_frames is None:
             raise ValueError("No frames were loaded from chain")
@@ -1097,7 +1084,7 @@ class LTXLat2VidAssembleLatentChainNood(io.ComfyNode):
             max_end = max(max_end, end_frame)
             segment_metadata.append((segment_path, segment_data, start_frame, n_frames, trim_lead_frames))
             prev_metadata = segment_data
-            await api.execution.set_progress(value=idx + 1, max_value=total_steps)
+            await _API.execution.set_progress(value=idx + 1, max_value=total_steps)
 
         if min_start is None or fps is None:
             raise ValueError("No segment metadata was loaded from chain")
@@ -1182,7 +1169,7 @@ class LTXLat2VidAssembleLatentChainNood(io.ComfyNode):
                 full_samples[:, :, dst_latent_idx : dst_latent_idx + 1, :, :] = samples[:, :, src_latent_idx : src_latent_idx + 1, :, :]
 
             del state_dict
-            await api.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
+            await _API.execution.set_progress(value=n_segments + idx + 1, max_value=total_steps)
 
         if full_samples is None:
             raise ValueError("No latents were loaded from chain")
@@ -1214,8 +1201,8 @@ class LTXLat2VidAssembleLatentChainNood(io.ComfyNode):
     ) -> str:
         chain = LTXLat2VidSegmentChainData.model_validate_any(chain)
         fingerprint = sha256()
-        fingerprint.update(str(chain.video_id).encode("utf-8"))
-        fingerprint.update(str(strict).encode("utf-8"))
+        fingerprint.update(str(chain.video_id).encode())
+        fingerprint.update(str(strict).encode())
 
         output_root = get_output_dir_path()
         for segment_path in chain.segment_paths:
@@ -1226,79 +1213,11 @@ class LTXLat2VidAssembleLatentChainNood(io.ComfyNode):
                 fingerprint.update(f"missing:{segment_path}".encode())
                 continue
             stats = abs_path.stat()
-            fingerprint.update(str(segment_path).encode("utf-8"))
-            fingerprint.update(str(stats.st_size).encode("utf-8"))
-            fingerprint.update(str(stats.st_mtime_ns).encode("utf-8"))
+            fingerprint.update(str(segment_path).encode())
+            fingerprint.update(str(stats.st_size).encode())
+            fingerprint.update(str(stats.st_mtime_ns).encode())
 
         return fingerprint.hexdigest()
-
-
-class LTXLat2VidVideoSelectNood(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="LTXLat2VidVideoSelectNood",
-            display_name="LTX-L2V Video Selector",
-            category="noodles/ltx",
-            inputs=[
-                io.Combo.Input(
-                    "video_folder",
-                    options=get_folders_in_outdir(depth=2),
-                    tooltip="Subfolder to load segments from. Can be connected to save node's 'subfolder' output.",
-                ),
-            ],
-            outputs=[
-                io.String.Output(
-                    display_name="video_folder",
-                    tooltip="The selected video folder. Connect to segment load nodes to load segments from this video.",
-                ),
-                ComfyULID.Output(display_name="video_id", tooltip="ULID for the selected video."),
-            ],
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        video_folder: str,
-        segment_idx: int,
-        iteration: int,
-    ) -> io.NodeOutput:
-        segment_path = find_segment_file(video_folder, segment_idx, iteration)
-        state_dict, segment_data, _, _ = load_segment_file(segment_path)
-
-        if "latent" not in state_dict:
-            raise ValueError("Segment file is missing required 'latent' tensor")
-        if "frames" not in state_dict and "compressed_frames" not in state_dict:
-            raise ValueError("Segment file does not contain a frame tensor")
-
-        samples = state_dict["latent"].cpu().contiguous()
-        if "frames" in state_dict:
-            frames = state_dict["frames"].cpu().contiguous()
-        elif "compressed_frames" in state_dict:
-            frames = decompress_image_tensor_webp(
-                state_dict["compressed_frames"].cpu().contiguous(),
-                (segment_data.width_px, segment_data.height_px),
-                as_float=True,
-            )
-
-        latent: dict[str, torch.Tensor] = {"samples": samples}
-
-        return io.NodeOutput(
-            latent,
-            frames,
-            segment_data,
-        )
-
-    @classmethod
-    def fingerprint_inputs(
-        cls,
-        video_folder: str,
-        segment_idx: int,
-        iteration: int,
-    ) -> str:
-        segment_path = find_segment_file(video_folder, segment_idx, iteration)
-        segment_hash = sha256(segment_path.read_bytes()).hexdigest()
-        return segment_hash
 
 
 class LTXLat2VidInplaceNood(io.ComfyNode):

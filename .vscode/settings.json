@@ -22,12 +22,14 @@
         "**/node_modules",
         "**/__pycache__",
         "**/.*",
+        "**/.venv",
         "**/venv",
 
         "**/dist",
         "**/build",
         "**/web_custom_versions",
-        "**/user/_manager"
+        "**/user/_manager",
+        "**/custom_nodes/comfy-noodles"
     ],
 
     "python.analysis.extraPaths": [
