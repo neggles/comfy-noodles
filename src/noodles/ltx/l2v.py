@@ -707,11 +707,13 @@ class LTXLat2VidSegmentLoadNood(io.ComfyNode):
         video_folder: str,
         segment_idx: int,
         iteration: int,
+        metadata_only: bool,
     ) -> str:
         segment_path = find_segment_file(video_folder, segment_idx, iteration).resolve()
         segment_stat = segment_path.stat()
 
         fingerprint = sha256()
+        fingerprint.update(str(metadata_only).encode("utf-8"))
         fingerprint.update(str(segment_path).encode("utf-8"))
         fingerprint.update(str(segment_stat.st_size).encode("utf-8"))
         fingerprint.update(str(segment_stat.st_mtime_ns).encode("utf-8"))
